@@ -8,8 +8,7 @@ If you use PIM-tree, please cite our paper:
 
 [2] **The Processing-in-Memory Model.** Hongbo Kang, Phillip B Gibbons, Guy E Blelloch, Laxman Dhulipala, Yan Gu, Charles McGuffey. 2021. In Proceedings of the 33rd ACM Symposium on Parallelism in Algorithms and Architectures. 295–306. [[doi](https://dl.acm.org/doi/10.1145/3409964.3461816)].
 
-### TODO: range partition link
-The codes for other PIM-based indexes serving as PIM-tree's competitors can be found [here](https://github.com/....). Implementation of shared-memory competitors is referred to [SetBench](https://bitbucket.org/trbot86/setbench/src/master/).
+The codes for other PIM-based indexes serving as PIM-tree's competitors can be found [here](https://github.com/Loremkang/pim_skip_list_partitioned). Implementation of shared-memory competitors is referred to [SetBench](https://bitbucket.org/trbot86/setbench/src/master/).
 
 This implementation was created to run the experiments in the paper. Current implementation of PIM-tree can only run on [UPMEM](https://www.upmem.com/) machines. This codeset is built on [UPMEM SDK](https://sdk.upmem.com/).
 
