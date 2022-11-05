@@ -86,39 +86,39 @@ This section will introduce the contents in each code file and how the codes are
 
 This directory contains the configurations of the hardware used and the data structure.
 
-```common.h```: Configuration of the data structure.
+```common.h```: Numeric configurations of the data structure.
 
-```settings.h```: Modes for program debugging.
+```settings.h```: Configuration for program modes. (whether to turn on (1) debugging (2) tracking of various metrics)
 
-```task_base.h```: Macros defining the DPU function calls.
+```task_base.h```: Macros defining the interface of DPU function calls (tasks sent between CPU and DPUs).
 
 ### ```/dpu```
 
-#### TODO
-
 This directory contains source codes used to build the DPU applications.
 
-```bnode.h```:
+```bnode.h```: Functions related to "distributed chunked skip list nodes" in layer 2 and 1.
 
-```cache.h```:
+```cache.h```: Definitions and functions related to "cache_init_record", a request generated when building
+shadow subtrees for new layer 2 nodes.
 
-```data_block.h```: 
+```data_block.h```: Definitions and functions related to "data_block", a variable length vector on MRAM, used as the
+storage unit for Bnodes.
 
 ```dpu_buffer.h```: Auxiliary function for procession of variable length data on DPUs.
 
-```dpu.c```: Main function for the DPU applications. Handling function calls from the CPU host application.
+```dpu.c```: Main function for the DPU applications. Handling function calls (tasks) from the CPU host application.
 
 ```gc.h```: DPU garbage collection.
 
-```hashtable_l3size.h```: 
+```hashtable_l3size.h```: Definition and implementation of the local linear-probing hash table on each DPU, used in GET, INSERT, and DELETE operations.
 
 ```l3_ab_tree.h```: Implementation of replicated upper part (L3 in our paper) with ab-tree.
 
-```l3_skip_list.h```: Implementation of replicated upper part (L3 in our paper) with skip list.
+```l3_skip_list.h```: Implementation of replicated upper part (L3 in our paper) with skip list. (abandoned)
 
-```node_dpu.h```: Defining node classes used.
+```node_dpu.h```: Defining node classes used in Layer 3, 2, 1, and data nodes.
 
-```pnode.h```: Implementation of L1 nodes.
+```pnode.h```: Implementation of data nodes.
 
 ```statistics.h```: Stats collection.
 
@@ -136,7 +136,7 @@ This directory contains source codes used to build the CPU host application.
 
 ```papi_counters.hpp```: Experiment stats collection.
 
-### ```/pim_base```
+### ```/pim_base/include```
 
 This submodule contains efficient low-level function calls we implemented, including efficient CPU-DPU communication, pipelining, performance stats collection, database correctness testing, argument parsing, random distribution generators and other miscs.
 
