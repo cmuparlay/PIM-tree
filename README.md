@@ -14,8 +14,6 @@ This implementation was created to run the experiments in the paper. Current imp
 
 ## Building
 
-### TODO: certain build commands
-
 To build everything, enter the root of the cloned repository. You will need to change `NR_DPUS` in `Makefile` to the number of DPU modules on your machine before you start building. Then run your desired command listed below.
 
 | Command | Description |
