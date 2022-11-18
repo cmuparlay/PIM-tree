@@ -1,4 +1,4 @@
-# PIM-tree-baseline-jumppush-pushpull
+# PIM-tree-baseline: Range Partitioning Skip List
 
 This repository comprise the range-partitioning baselines of the PIM-tree.
 
