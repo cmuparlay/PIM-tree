@@ -1,302 +1,215 @@
 #pragma once
 
-#ifdef L3_SKIP_LIST
-#include "l3_skip_list.h"
-#else
-#include "l3_ab_tree.h"
-#endif
+#include "common.h"
+#include "node_dpu.h"
+#include "stdlib.h"
+#include <mutex.h>
+// #include "task_dpu.h"
+// #include "garbage_collection.h"
 
-#include "bnode.h"
-#include "hashtable_l3size.h"
-#include "statistics.h"
-#include "macro.h"
+typedef struct ht_slot {
+    uint32_t pos;  // ideal position in the hash table
+    uint32_t v;    // value
+} ht_slot;
 
-__host mpuint8_t wram_heap_save_addr = NULL_pt(mpuint8_t);  // IRAM friendly
+// #define null_ht_slot ((ht_slot){.pos = 0, .v = 0})
 
-__mram_noinit Bnode bbuffer_tmp[B_BUFFER_SIZE / sizeof(Bnode)];
-__mram_noinit cache_init_record cirbuffer_tmp[CACHE_INIT_RECORD_SIZE / sizeof(cache_init_record)];
-__mram_noinit data_block dbbuffer_tmp[DB_BUFFER_SIZE / sizeof(data_block)];
+const ht_slot null_ht_slot = ((ht_slot){.pos = 0, .v = 0});
 
-#ifdef L3_SKIP_LIST
-__mram_noinit uint8_t l3buffer_tmp[L3_BUFFER_SIZE];
-#else
-__mram_noinit L3Bnode l3bbuffer_tmp[L3_BUFFER_SIZE / sizeof(L3Bnode)];
-#endif
+// #define LX_HASHTABLE_SIZE (1 << 10)
+// L3
+MUTEX_INIT(get_new_L3_lock);
+MUTEX_INIT(ht_lock);
+extern __mram_ptr ht_slot l3ht[];  // must be 8 bytes aligned. 0 as null.
+extern int l3htcnt;
+extern __mram_ptr uint8_t l3buffer[];
+extern int l3cnt;
 
-__mram_noinit Pnode pbuffer_tmp[P_BUFFER_SIZE / sizeof(Pnode)];
-__mram_noinit ht_slot ht_tmp[LX_HASHTABLE_SIZE];
-__mram_noinit int64_t send_varlen_offset_tmp[NR_TASKLETS][MAX_TASK_COUNT_PER_TASKLET_PER_BLOCK];
-__mram_noinit uint8_t send_varlen_buffer_tmp[NR_TASKLETS][MAX_TASK_BUFFER_SIZE_PER_TASKLET];
+// L2
+MUTEX_INIT(get_new_L2_lock);
+extern __mram_ptr ht_slot l2ht[];  // must be 8 bytes aligned. 0 as null.
+extern int l2htcnt;
+extern __mram_ptr uint8_t l2buffer[];
+extern int l2cnt;
 
-// dpu.c
-extern int64_t DPU_ID; // = -1;
-#ifdef L3_SKIP_LIST
 extern mL3ptr root;
-#else
-extern mL3Bptr root;
-#endif
-extern bool wram_init_flag;
 
-// bnode.h
-extern uint32_t bcnt; // = 1;
-extern mBptr bbuffer_start, bbuffer_end;
-extern mBptr bbuffer;
-// __mram_noinit Bnode bbuffer[B_BUFFER_SIZE / sizeof(Bnode)];
+// __mram_noinit uint8_t l2buffer[LX_BUFFER_SIZE];
+// int l2cnt;
 
-// cache.h
-extern uint32_t circnt; // = 1;
-extern mcirptr cirbuffer;
-extern mcirptr cirbuffer_start, cirbuffer_end;
-// __mram_noinit cache_init_record cirbuffer[CACHE_INIT_RECORD_SIZE / sizeof(cache_init_record)];
+// __mram_noinit uint8_t l1buffer[LX_BUFFER_SIZE];
+// int l1cnt;
 
-// data_block.h
-extern uint32_t dbcnt; // = 1;
-extern mdbptr dbbuffer_start, dbbuffer_end;
-extern mdbptr dbbuffer;
-// __mram_noinit data_block dbbuffer[DB_BUFFER_SIZE / sizeof(data_block)];
+// __mram_noinit uint8_t l0buffer[LX_BUFFER_SIZE];
+// int l0cnt;
 
-// l3.h
-#ifdef L3_SKIP_LIST
-extern uint32_t l3cnt; // = 8;
-extern mpuint8_t l3buffer;
-// __mram_noinit uint8_t l3buffer[L3_BUFFER_SIZE];
-#else
-extern uint32_t l3bcnt; // = 1;
-extern mL3Bptr l3bbuffer;
-// __mram_noinit L3Bnode l3bbuffer[L3_BUFFER_SIZE / sizeof(L3Bnode)];
-#endif
+// __mram_ptr uint8_t* l2ht[LX_HASHTABLE_SIZE];
+// __mram_ptr uint8_t* l1ht[LX_HASHTABLE_SIZE];
+// __mram_ptr uint8_t* l0ht[LX_HASHTABLE_SIZE];
 
-// pnode.h
-extern uint32_t pcnt; // = 1;
-extern mPptr pbuffer_start, pbuffer_end;
-extern mPptr pbuffer;
-// __mram_noinit Pnode pbuffer[P_BUFFER_SIZE / sizeof(Pnode)];
 
-// statistics.h
-#ifdef DPU_STATISTICS
-extern int num_of_node[]; // [NODE_NUM_CNT];
-#endif
-
-// storage.h
-extern int htcnt; // = 0;
-extern __mram_ptr ht_slot * ht;
-// __mram_noinit ht_slot ht[LX_HASHTABLE_SIZE];
-
-// task_dpu.h
-extern mpint64_t send_varlen_offset[];
-extern mpuint8_t send_varlen_buffer[];
-// __mram_noinit int64_t send_varlen_offset[NR_TASKLETS][MAX_TASK_COUNT_PER_TASKLET_PER_BLOCK];
-// __mram_noinit uint8_t send_varlen_buffer[NR_TASKLETS][MAX_TASK_BUFFER_SIZE_PER_TASKLET];
-// extern mpuint8_t recv_buffer;
-// extern mpuint8_t send_buffer;
-
-extern gcnode free_list_bnode;
-extern gcnode free_list_pnode;
-extern gcnode free_list_bnode_tmp;
-extern gcnode free_list_l3bnode;
-extern gcnode free_list_data_block;
-
-typedef struct WRAMHeap {
-
-    int64_t DPU_ID;
-    #ifdef L3_SKIP_LIST
-    mL3ptr root;
-    #else
-    mL3Bptr root;
-    #endif
-
-    uint32_t bcnt;
-    mBptr bbuffer;
-    mBptr bbuffer_start;
-    mBptr bbuffer_end;
-
-    uint32_t circnt;
-    mcirptr cirbuffer;
-    mcirptr cirbuffer_start;
-    mcirptr cirbuffer_end;
-
-    uint32_t dbcnt;
-    mdbptr dbbuffer;
-    mdbptr dbbuffer_start;
-    mdbptr dbbuffer_end;
-    
-    #ifdef L3_SKIP_LIST
-    uint32_t l3cnt;
-    mpuint8_t l3buffer;
-    #else
-    uint32_t l3bcnt;
-    mL3Bptr l3bbuffer;
-    mL3Bptr l3bbuffer_start;
-    mL3Bptr l3bbuffer_end;
-    #endif
-
-    uint32_t pcnt;
-    mPptr pbuffer;
-    mPptr pbuffer_start;
-    mPptr pbuffer_end;
-
-    #ifdef DPU_STATISTICS
-    int num_of_node[NODE_NUM_CNT];
-    #endif
-
-    int htcnt;
-    __mram_ptr ht_slot * ht;
-
-    mpint64_t send_varlen_offset[NR_TASKLETS];
-    mpuint8_t send_varlen_buffer[NR_TASKLETS];
-
-    gcnode free_list_bnode;
-    gcnode free_list_bnode_tmp;
-    gcnode free_list_pnode;
-    gcnode free_list_l3bnode;
-    gcnode free_list_data_block;
-
-#ifdef DPU_ENERGY
-    uint64_t op_cnt;
-    uint64_t db_size_cnt;
-    uint64_t cycle_cnt;
-#endif
-
-} WRAMHeap; //` __attribute__((aligned (8)));
-
-__mram_noinit uint8_t wram_heap_save_addr_tmp[sizeof(WRAMHeap) << 1];
-
-void wram_heap_save() {
-    mpuint8_t saveAddr = wram_heap_save_addr;
-    WRAMHeap heapInfo = (WRAMHeap){
-        .DPU_ID = DPU_ID,
-        .root = root,
-        .bcnt = bcnt,
-        .bbuffer = bbuffer,
-        .bbuffer_start = bbuffer_start,
-        .bbuffer_end = bbuffer_end,
-        .circnt = circnt,
-        .cirbuffer = cirbuffer,
-        .cirbuffer_start = cirbuffer_start,
-        .cirbuffer_end = cirbuffer_end,
-        .dbcnt = dbcnt,
-        .dbbuffer = dbbuffer,
-        .dbbuffer_start = dbbuffer_start,
-        .dbbuffer_end = dbbuffer_end,
-        #ifdef L3_SKIP_LIST
-        .l3cnt = l3cnt,
-        .l3buffer = l3buffer,
-        #else
-        .l3bcnt = l3bcnt,
-        .l3bbuffer = l3bbuffer,
-        .l3bbuffer_start = l3bbuffer_start,
-        .l3bbuffer_end = l3bbuffer_end,
-        #endif
-        .pcnt = pcnt,
-        .pbuffer = pbuffer,
-        .pbuffer_start = pbuffer_start,
-        .pbuffer_end = pbuffer_end,
-        .htcnt = htcnt,
-        .ht = ht,
-        .free_list_bnode = free_list_bnode,
-        .free_list_bnode_tmp = free_list_bnode_tmp,
-        .free_list_data_block = free_list_data_block,
-        .free_list_l3bnode = free_list_l3bnode,
-        .free_list_pnode = free_list_pnode,
-#ifdef DPU_ENERGY
-        .op_cnt = op_count,
-        .db_size_cnt = db_size_count,
-        .cycle_cnt = cycle_count,
-#endif
-    };
-    #ifdef DPU_STATISTICS
-    for(int i=0; i<NODE_NUM_CNT; i++)
-        heapInfo.num_of_node[i] = num_of_node[i];
-    #endif
-    for(int i=0; i<NR_TASKLETS; i++){
-        heapInfo.send_varlen_offset[i] = send_varlen_offset[i];
-        heapInfo.send_varlen_buffer[i] = send_varlen_buffer[i];
+__host bool storage_inited = false;
+static inline void storage_init() {
+    if (storage_inited) {
+        return;
     }
-
-    if(saveAddr == NULL_pt(mpuint8_t)) saveAddr = wram_heap_save_addr_tmp;
-    mram_write(&heapInfo, (mpuint8_t)saveAddr, sizeof(WRAMHeap));
-    wram_heap_save_addr = saveAddr;
+    storage_inited = true;
+    ht_slot hs = null_ht_slot;
+    for (int i = 0; i < LX_HASHTABLE_SIZE; i++) {
+        l3ht[i] = hs;
+        l2ht[i] = hs;
+    }
+    // L3_gc_init();
+}
+static inline void ht_insert(__mram_ptr ht_slot* ht, int* cnt, int32_t pos,
+                             uint32_t val) {
+    mutex_lock(ht_lock);
+    int ipos = pos;
+    ht_slot hs = ht[pos];
+    while (hs.v != 0) {  // find slot
+        pos = (pos + 1) & (LX_HASHTABLE_SIZE - 1);
+        hs = ht[pos];
+        IN_DPU_ASSERT(pos != ipos, "htisnert: full\n");
+    }
+    ht[pos] = (ht_slot){.pos = ipos, .v = val};
+    *cnt = *cnt + 1;
+    mutex_unlock(ht_lock);
 }
 
-void wram_heap_init() {
-    bbuffer = bbuffer_tmp;
-    cirbuffer = cirbuffer_tmp;
-    dbbuffer = dbbuffer_tmp;
-    pbuffer = pbuffer_tmp;
-    
-    #ifdef L3_SKIP_LIST
-    l3buffer = l3buffer_tmp;
-    #else
-    l3bbuffer = l3bbuffer_tmp;
-    #endif
-    ht = ht_tmp;
-    
-    statistic_init();
-    for(int i=0; i<NR_TASKLETS; i++) {
-        send_varlen_offset[i] = &(send_varlen_offset_tmp[i][0]);
-        send_varlen_buffer[i] = &(send_varlen_buffer_tmp[i][0]);
+static inline bool ht_no_greater_than(int a, int b) {  // a <= b with wrapping
+    int delta = b - a;
+    if (delta < 0) {
+        delta += LX_HASHTABLE_SIZE;
     }
-#ifdef DPU_ENERGY
-    op_count = 0;
-    db_size_count = 0;
-    cycle_count = 0;
-#endif
+    return delta < (LX_HASHTABLE_SIZE >> 1);
 }
 
-void wram_heap_load() {
-    mpuint8_t saveAddr = wram_heap_save_addr;
-    if(saveAddr == NULL_pt(mpuint8_t)) wram_heap_init();
-    else {
-        WRAMHeap heapInfo;
-        mram_read((mpuint8_t)saveAddr, &heapInfo, sizeof(WRAMHeap));
+static inline void ht_delete(__mram_ptr ht_slot* ht, int* cnt, int32_t pos,
+                             uint32_t val) {
+    mutex_lock(ht_lock);
+    int ipos = pos;  // initial position
+    ht_slot hs = ht[pos];
+    while (hs.v != val) {  // find slot
+        pos = (pos + 1) & (LX_HASHTABLE_SIZE - 1);
+        hs = ht[pos];
+        IN_DPU_ASSERT(pos != ipos, "htisnert: full\n");
+    }
+    ipos = pos;  // position to delete
+    pos = (pos + 1) & (LX_HASHTABLE_SIZE - 1);
 
-        DPU_ID = heapInfo.DPU_ID;
-        root = heapInfo.root;
-        bcnt = heapInfo.bcnt;
-        bbuffer = heapInfo.bbuffer;
-        bbuffer_start = heapInfo.bbuffer_start;
-        bbuffer_end = heapInfo.bbuffer_end;
-        circnt = heapInfo.circnt;
-        cirbuffer = heapInfo.cirbuffer;
-        cirbuffer_start = heapInfo.cirbuffer_start;
-        cirbuffer_end = heapInfo.cirbuffer_end;
-        dbcnt = heapInfo.dbcnt;
-        dbbuffer = heapInfo.dbbuffer;
-        dbbuffer_start = heapInfo.dbbuffer_start;
-        dbbuffer_end = heapInfo.dbbuffer_end;
-        #ifdef L3_SKIP_LIST
-        l3cnt = heapInfo.l3cnt;
-        l3buffer = heapInfo.l3buffer;
-        #else
-        l3bcnt = heapInfo.l3bcnt;
-        l3bbuffer = heapInfo.l3bbuffer;
-        l3bbuffer_start = heapInfo.l3bbuffer_start;
-        l3bbuffer_end = heapInfo.l3bbuffer_end;
-        #endif
-        pcnt = heapInfo.pcnt;
-        pbuffer = heapInfo.pbuffer;
-        pbuffer_start = heapInfo.pbuffer_start;
-        pbuffer_end = heapInfo.pbuffer_end;
-        htcnt = heapInfo.htcnt;
-        ht = heapInfo.ht;
-        free_list_bnode = heapInfo.free_list_bnode;
-        free_list_bnode_tmp = heapInfo.free_list_bnode_tmp;
-        free_list_data_block = heapInfo.free_list_data_block;
-        free_list_l3bnode = heapInfo.free_list_l3bnode;
-        free_list_pnode = heapInfo.free_list_pnode;
-
-        #ifdef DPU_STATISTICS
-        for(int i=0; i<NODE_NUM_CNT; i++)
-            num_of_node[i] = heapInfo.num_of_node[i];
-        #endif
-        for(int i=0; i<NR_TASKLETS; i++){
-            send_varlen_offset[i] = heapInfo.send_varlen_offset[i];
-            send_varlen_buffer[i] = heapInfo.send_varlen_buffer[i];
+    while (true) {
+        hs = ht[pos];
+        if (hs.v == 0) {
+            ht[ipos] = null_ht_slot;
+            break;
+        } else if (ht_no_greater_than(hs.pos, ipos)) {
+            ht[ipos] = hs;
+            ipos = pos;
+        } else {
         }
-#ifdef DPU_ENERGY
-        op_count = heapInfo.op_cnt;
-        db_size_count = heapInfo.db_size_cnt;
-        cycle_count = heapInfo.cycle_cnt;
-#endif
+        pos = (pos + 1) & (LX_HASHTABLE_SIZE - 1);
+        IN_DPU_ASSERT(pos != ipos, "htisnert: full\n");
     }
+    *cnt = *cnt - 1;
+    mutex_unlock(ht_lock);
+}
+
+static inline uint32_t ht_search(__mram_ptr ht_slot* ht, int64_t key,
+                                 int (*filter)(ht_slot, int64_t)) {
+    int ipos = hash_to_addr(key, 0, LX_HASHTABLE_SIZE);
+    int pos = ipos;
+    while (true) {
+        ht_slot hs = ht[pos];  // pull to wram
+        int v = filter(hs, key);
+        if (v == -1) {  // empty slot
+            return INVALID_DPU_ADDR;
+            // continue;
+        } else if (v == 0) {  // incorrect value
+            pos = (pos + 1) & (LX_HASHTABLE_SIZE - 1);
+        } else if (v == 1) {  // correct value;
+            return (uint32_t)hs.v;
+        }
+        IN_DPU_ASSERT(pos != ipos, "htisnert: full\n");
+    }
+}
+
+// L3
+static inline uint32_t L3_node_size(int height) {
+    return sizeof(L3node) + sizeof(pptr) * height * 2;
+}
+
+static inline L3node* init_L3(int64_t key, int height, pptr down,
+                              uint8_t* buffer, __mram_ptr void* maddr) {
+    L3node* nn = (L3node*)buffer;
+    nn->key = key;
+    nn->height = height;
+    nn->down = down;
+    nn->left = (mppptr)(maddr + sizeof(L3node));
+    nn->right = (mppptr)(maddr + sizeof(L3node) + sizeof(pptr) * height);
+    // for (int i = 0; i < sizeof(pptr) * height * 2; i ++) {
+    //     buffer[sizeof(L3node) + i] = (uint8_t)-1;
+    // }
+    memset(buffer + sizeof(L3node), -1, sizeof(pptr) * height * 2);
+    return nn;
+}
+
+static inline __mram_ptr void* reserve_space_L3(uint32_t size) {
+    // mutex_lock(get_new_L3_lock);
+    __mram_ptr void* ret = l3buffer + l3cnt;
+    l3cnt += size;
+    IN_DPU_ASSERT(l3cnt < L3_BUFFER_SIZE, "rs3! of\n");
+    // mutex_unlock(get_new_L3_lock);
+    return ret;
+}
+
+static inline mL3ptr get_new_L3(int64_t key, int height, pptr down, __mram_ptr void* maddr) {
+    int size = L3_node_size(height);
+    // __mram_ptr void* maddr = reserve_space_L3(size);
+    uint8_t buffer[sizeof(L3node) + sizeof(pptr) * 2 * MAX_L3_HEIGHT];
+    L3node* nn = init_L3(key, height, down, buffer, maddr);
+    mram_write((void*)nn, maddr, size);
+    // ht_insert(l3ht, &l3htcnt, hash_to_addr(key, 0, LX_HASHTABLE_SIZE),
+    //           (uint32_t)maddr);
+    return maddr;
+}
+
+// L2
+static inline uint32_t L2_node_size(int height) {
+    return sizeof(L2node) + sizeof(int64_t) * height + sizeof(pptr) * height * 2;
+}
+
+static inline L2node* init_L2(int64_t key, int height, pptr down,
+                              uint8_t* buffer, __mram_ptr void* maddr) {
+    IN_DPU_ASSERT(height <= LOWER_PART_HEIGHT, "init L2: wrong height");
+    L2node* nn = (L2node*)buffer;
+    nn->key = key;
+    nn->height = height;
+    nn->down = down;
+    nn->chk = (mpint64_t)(maddr + sizeof(L2node));
+    nn->left = (mppptr)(maddr + sizeof(L2node) + sizeof(int64_t) * height);
+    nn->right = (mppptr)(maddr + sizeof(L2node) + sizeof(int64_t) * height + sizeof(pptr) * height);
+    memset(buffer + sizeof(L2node), -1, sizeof(int64_t) * height + sizeof(pptr) * height * 2);
+    return nn;
+}
+
+static inline __mram_ptr void* reserve_space_L2(uint32_t size) {
+    __mram_ptr void* ret = l2buffer + l2cnt;
+    l2cnt += size;
+    IN_DPU_ASSERT(l2cnt < L2_BUFFER_SIZE, "rs2! of\n");
+    return ret;
+}
+
+static inline mL2ptr get_new_L2(int64_t key, int height, pptr down,
+                                __mram_ptr void* maddr) {
+    int l2height = (height > LOWER_PART_HEIGHT) ? LOWER_PART_HEIGHT : height;
+    // IN_DPU_ASSERT(height <= LOWER_PART_HEIGHT, "get new L2: height too big");
+    int size = L2_node_size(l2height);
+    uint8_t buffer[sizeof(L2node) +
+                   (sizeof(int64_t) + sizeof(pptr) * 2) * LOWER_PART_HEIGHT];
+    L2node* nn = init_L2(key, l2height, down, buffer, maddr);
+    nn->height = height;
+    mram_write((void*)nn, maddr, size);
+    // ht_insert(l2ht, &l2htcnt, hash_to_addr(key, 0, LX_HASHTABLE_SIZE),
+    //           (uint32_t)maddr);
+    return maddr;
 }
