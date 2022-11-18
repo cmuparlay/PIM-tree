@@ -1,3 +1,6 @@
 [submodule "PIM-base"]
 	path = PIM-base
 	url = https://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@github.com/cmuparlay/PIM-base
+[submodule "parlaylib"]
+	path = parlaylib
+	url = https://github.com/Loremkang/parlaylib.git
