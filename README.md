@@ -8,9 +8,8 @@ If you use PIM-tree, please cite our paper:
 
 [2] **The Processing-in-Memory Model.** Hongbo Kang, Phillip B Gibbons, Guy E Blelloch, Laxman Dhulipala, Yan Gu, Charles McGuffey. 2021. In Proceedings of the 33rd ACM Symposium on Parallelism in Algorithms and Architectures. 295–306. [[doi](https://dl.acm.org/doi/10.1145/3409964.3461816)].
 
-### TODO: range partition link
-Related Repositories:
-1. The codes for range-partitioning PIM-based indexes serving as PIM-tree's competitors can be found [here](https://github.com/....).
+### Related Repositories:
+1. The codes for range-partitioning PIM-based indexes serving as PIM-tree's competitors can be found in this repo at branch `range_partition`.
 2. The codes for baseline "Jump-Push Search" and "Push-Pull Search" used in the study of the impact of different optimizations can be found in this repo at branch `jumppush_pushpull`.
 3. Implementation of shared-memory competitors is referred to [SetBench](https://bitbucket.org/trbot86/setbench/src/master/).
 
@@ -19,8 +18,6 @@ Related Repositories:
 This implementation was created to run the experiments in the paper. Current implementation of PIM-tree can only run on [UPMEM](https://www.upmem.com/) machines. This codeset is built on [UPMEM SDK](https://sdk.upmem.com/).
 
 ## Building
-
-### TODO: certain build commands
 
 To build everything, enter the root of the cloned repository. You will need to change `NR_DPUS` in `Makefile` to the number of DPU modules on your machine before you start building. Then run your desired command listed below.
 
