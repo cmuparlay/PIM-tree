@@ -1,39 +1,61 @@
 #pragma once
+
+#include <stdlib.h>
+#include <mutex.h>
 #include "common.h"
 #include "node_dpu.h"
 
-extern __mram_ptr uint8_t l3buffer[];
-extern int l3cnt;
+#define GC_ACTIVE
 
-typedef struct garbage {
-    uint64_t nxt; // 8B aligned
-    int64_t height; // same place as height in nodes
-} garbage;
+typedef struct gcnode {
+    pptr size_addr;
+    int64_t content[];
+} gcnode;
 
-__host __mram_ptr uint64_t L3_garbage[MAX_L3_HEIGHT];
+typedef __mram_ptr struct gcnode* mgcptr;
 
-void L3_gc_init() {
-    memset(L3_garbage, -1, sizeof(L3_garbage));
-}
+gcnode free_list_l3node[MAX_L3_HEIGHT]; // for l3node
 
-void L3_gc(mL3ptr space, int height) {
-    IN_DPU_ASSERT(height < MAX_L3_HEIGHT, "L3_garbage_collect: recycling a node too high");
-    __mram_ptr garbage* g = (__mram_ptr garbage*)space;
-    g->nxt = L3_garbage[height];
-    g->height = -1;
-    L3_garbage[height] = (uint64_t)g;
-}
-
-mL3ptr L3_allocate(int height) {
-    int actual_size = sizeof(L3node) + sizeof(pptr) * height * 2;
-    if (L3_garbage[height] == (uint64_t)-1) {
-        mL3ptr addr = (mL3ptr)(l3buffer + l3cnt);
-        l3cnt += actual_size;
-        return addr;
-    } else {
-        IN_DPU_ASSERT(false, "wrong");
-        __mram_ptr garbage* addr = (__mram_ptr garbage*)L3_garbage[height];
-        L3_garbage[height] = addr->nxt;
-        return (mL3ptr)addr;
+void gc_init() {
+    #ifdef GC_ACTIVE
+    for (int i = 0; i < MAX_L3_HEIGHT; i ++) {
+        free_list_l3node[i].size_addr = PPTR(0, INVALID_DPU_ADDR);
     }
+    #endif
+}
+
+void free_node(mL3ptr nn, int size) {
+    #ifdef GC_ACTIVE
+    IN_DPU_ASSERT(size < MAX_L3_HEIGHT, "free node invalid size");
+    mgcptr gcnn = (mgcptr)nn;
+    pptr addr = free_list_l3node[size].size_addr;
+    gcnn->size_addr = addr;
+    free_list_l3node[size].size_addr = PPTR(addr.id + 1, gcnn);
+    #endif
+}
+
+
+pptr alloc_node(int height, uint32_t n) { // return (num_node_get, gcnodeaddr)
+    #ifndef GC_ACTIVE
+    return PPTR(0, INVALID_DPU_ADDR);
+    #else
+    IN_DPU_ASSERT(height < MAX_L3_HEIGHT, "alloc node invalid size");
+    IN_DPU_ASSERT(n > 0, "alloc node invalid n");
+    pptr addr = free_list_l3node[height].size_addr;
+    if (addr.id >= n) { // have more nodes than requied
+        mgcptr nxt = (mgcptr)free_list_l3node[height].size_addr.addr;
+        pptr ret = PPTR(n, nxt);
+        for (uint32_t i = 0; i < n; i ++) {
+            gcnode nxtnode = *nxt;
+            IN_DPU_ASSERT((uint32_t)nxt != INVALID_DPU_ADDR, "alloc invalid nxt");
+            nxt = (mgcptr)nxtnode.size_addr.addr;
+        }
+        free_list_l3node[height].size_addr = PPTR(addr.id - n, nxt);
+        return ret;
+    } else { // run out of recycled nodes
+        pptr ret = free_list_l3node[height].size_addr;
+        free_list_l3node[height].size_addr = PPTR(0, INVALID_DPU_ADDR);
+        return ret;
+    }
+    #endif
 }
