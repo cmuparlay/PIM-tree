@@ -4,7 +4,7 @@ PIM-tree is a theoretically and practically efficient comparison-based ordered i
 
 If you use PIM-tree, please cite our paper:
 
-[1] **PIM-tree: A Skew-resistant Index for Processing-in-Memory**. Hongbo Kang, Yiwei Zhao, Guy E. Blelloch, Laxman Dhulipala, Yan Gu, Charles McGuffey, and Phillip B. Gibbons. Proceedings of the VLDB Endowment (PVLDB), 16(4): 946-958, 2022. *doi:10.14778/3574245.3574275*. *arxiv Preprint: 2211.10516*. [[Paper](https://www.vldb.org/pvldb/volumes/16/paper/PIM-tree%3A%20A%20Skew-resistant%20Index%20for%20Processing-in-Memory)][[arXiv](https://arxiv.org/abs/2211.10516)].
+[1] **PIM-tree: A Skew-resistant Index for Processing-in-Memory**. Hongbo Kang, Yiwei Zhao, Guy E. Blelloch, Laxman Dhulipala, Yan Gu, Charles McGuffey, and Phillip B. Gibbons. Proceedings of the VLDB Endowment (PVLDB), 16(4): 946-958, 2022. *doi:10.14778/3574245.3574275*. *arxiv Preprint: 2211.10516*. [[Paper](https://dl.acm.org/doi/10.14778/3574245.3574275)][[arXiv](https://arxiv.org/abs/2211.10516)].
 
 [2] **The Processing-in-Memory Model.** Hongbo Kang, Phillip B Gibbons, Guy E Blelloch, Laxman Dhulipala, Yan Gu, Charles McGuffey. 2021. In Proceedings of the 33rd ACM Symposium on Parallelism in Algorithms and Architectures. 295–306. [[doi](https://dl.acm.org/doi/10.1145/3409964.3461816)].
 
