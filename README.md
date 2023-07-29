@@ -39,6 +39,8 @@ Host and DPU applications ending with `no_shadow_subtree` serve as a competitor 
 
 Host and DPU applications ending with `energy` are used to collect energy consumption data.
 
+Note: Our codes uses [PAPI](https://icl.utk.edu/papi/) as performance collectors. Please install this codebase before you run.
+
 ## Running
 
 The basic structure for a running command is:
