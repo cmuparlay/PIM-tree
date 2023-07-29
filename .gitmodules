@@ -2,3 +2,4 @@
 [submodule "pim_base"]
 	path = pim_base
 	url = https://github.com/cmuparlay/pim_base.git
+	branch = range_partition
