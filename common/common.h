@@ -15,6 +15,8 @@
 // HASH TABLE 8MB. should be power of 2
 #define LX_HASHTABLE_SIZE ((4 << 20) >> 3)
 
+#define L2_SIZE (16)
+
 static inline int hh(int64_t key, uint64_t height, uint64_t M) {
     key = (key % M);
     key = (key < 0) ? (key + M) : key;

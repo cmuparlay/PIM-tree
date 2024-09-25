@@ -24,6 +24,21 @@ private:
     const int64_t KEY_RANGE_MIN = INT64_MIN;
     const uint64_t KEY_RANGE_SIZE = UINT64_MAX;
 
+    void init_dpus() {
+        printf("\n********** INIT DPUS **********\n");
+        auto io = IO_Manager::alloc_io_manager();
+        io->init();
+        IO_Task_Batch* batch = io->alloc<dpu_init_task, empty_task_reply>(direct);
+
+        parlay::parallel_for(0, nr_of_dpus, [&](size_t i) {
+            auto it = (dpu_init_task*)batch->push_task_zero_copy(i, -1, false);
+            *it = (dpu_init_task){.dpu_id = (int64_t)i};
+        });
+        io->finish_task_batch();
+        ASSERT(!io->exec());
+        io->reset();
+    }
+
     void init_splits() {
         printf("\n********** INIT SPLITS **********\n");
         key_split = parlay::sequence<int64_t>(nr_of_dpus);
@@ -42,7 +57,7 @@ private:
     void init_skiplist() {
         printf("\n********** INIT SKIP LIST **********\n");
 
-        auto io = alloc_io_manager();
+        auto io = IO_Manager::alloc_io_manager();
         io->init();
         auto batch = io->alloc<L3_init_task, empty_task_reply>(direct);
         parlay::sequence<int> location(nr_of_dpus);
@@ -136,8 +151,27 @@ public:
     pim_skip_list(): init_state(false), max_height(MAX_L3_HEIGHT - 1) {}
 
     void Init() {
-        time_nested("init splits", init_splits);
-        time_nested("init_skiplist", init_skiplist);
+        time_nested("init splits", [&]() {
+            cpu_coverage_timer->start();
+            init_dpus();
+            cpu_coverage_timer->end();
+            cpu_coverage_timer->reset();
+            pim_coverage_timer->reset();
+        });
+        time_nested("init splits", [&]() {
+            cpu_coverage_timer->start();
+            init_splits();
+            cpu_coverage_timer->end();
+            cpu_coverage_timer->reset();
+            pim_coverage_timer->reset();
+        });
+        time_nested("init_skiplist", [&]() {
+            cpu_coverage_timer->start();
+            init_skiplist();
+            cpu_coverage_timer->end();
+            cpu_coverage_timer->reset();
+            pim_coverage_timer->reset();
+        });
     }
 
     void SetPushPullLimit(size_t limit) {}
@@ -148,7 +182,7 @@ public:
 
         auto splits = make_slice(min_key);
 
-        time_start("find_target");
+        time_start("find_target", timer::current_timer);
         auto target = parlay::tabulate(batch_size, [&](size_t i) { return find_target(get_key(i), splits); });
         time_end("find_target");
 
@@ -157,7 +191,7 @@ public:
 
         auto location = parlay::sequence<int>(n);
         time_nested("taskgen", [&]() {
-            io = alloc_io_manager();
+            io = IO_Manager::alloc_io_manager();
             io->init();
             batch = io->alloc<L3_get_task, L3_get_reply>(direct);
             time_nested("push_task", [&]() {
@@ -169,7 +203,7 @@ public:
         });
 
         time_nested("exec", [&]() { ASSERT(io->exec()); });
-        time_start("get_result");
+        time_start("get_result", timer::current_timer);
         parfor_wrap(0, batch_size, [&](size_t i) {
             auto reply = (L3_get_reply*)batch->ith(target[i], location[i]);
             if (reply->valid == 1) {
@@ -194,7 +228,7 @@ public:
         size_t n = length = batch_size;
         auto splits = make_slice(min_key);
 
-        time_start("find_target");
+        time_start("find_target", timer::current_timer);
         auto target = parlay::tabulate(
             n, [&](size_t i) { return find_target(get_key(i), splits); });
         time_end("find_target");
@@ -204,7 +238,7 @@ public:
 
         auto location = parlay::sequence<int>(n);
         time_nested("taskgen", [&]() {
-            io = alloc_io_manager();
+            io = IO_Manager::alloc_io_manager();
             io->init();
             batch = io->alloc<L3_search_task, L3_search_reply>(direct);
             time_nested("push_task", [&]() {
@@ -216,7 +250,7 @@ public:
         });
 
         time_nested("exec", [&]() { ASSERT(io->exec()); });
-        time_start("get_result");
+        time_start("get_result", timer::current_timer);
         parfor_wrap(0, n, [&](size_t i) {
             auto reply = (L3_search_reply*)batch->ith(target[i], location[i]);
             kv_output[i] = (key_value){.key = reply->key, .value = reply->value};
@@ -229,15 +263,14 @@ public:
     template<typename GetKVF>
     void RunBatchInsert(size_t batch_size, GetKVF get_kv) {
         size_t n = length = batch_size;
-        slice<key_value*, key_value*> kvs;
 
-        time_nested("sort", [&]() {
-            parfor_wrap(0, n, [&](size_t i) {
-                kv_input[i] = get_kv();
-            });
-            kvs = parlay::make_slice(kv_input, kv_input + n);
-            parlay::sort_inplace(kvs);
+        time_start("sort", timer::current_timer);
+        parfor_wrap(0, n, [&](size_t i) {
+            kv_input[i] = get_kv(i);
         });
+        slice<key_value*, key_value*> kvs = parlay::make_slice(kv_input, kv_input + n);
+        parlay::sort_inplace(kvs);
+        time_end("sort");
 
         auto kv_sorted =
             parlay::pack(kvs, parlay::delayed_seq<bool>(n, [&](size_t i) {
@@ -263,7 +296,8 @@ public:
         auto heights = parlay::sequence<int>(n);
         time_nested("init height", [&]() {
             parlay::parallel_for(0, n, [&](size_t i) {
-                int32_t t = rn_gen::parallel_rand();
+                // int32_t t = rn_gen::parallel_rand();
+                int32_t t = (int32_t)parlay::hash64(keys_sorted[i]);
                 t = t & (-t);
                 int h = __builtin_ctz(t) + 1;
                 h = min(h, max_height);
@@ -273,7 +307,7 @@ public:
 
         auto location = parlay::sequence<int>(n);
         time_nested("taskgen", [&]() {
-            io = alloc_io_manager();
+            io = IO_Manager::alloc_io_manager();
             io->init();
             batch = io->alloc<L3_insert_task, empty_task_reply>(direct);
             batch->push_task_sorted(
@@ -320,15 +354,14 @@ public:
     template <typename GetKeyF>
     void RunBatchRemove(size_t batch_size, GetKeyF get_key) {
         size_t n = length = batch_size;
-        slice<int64_t*, int64_t*> keys;
 
-        time_nested("sort", [&]() {
-            parfor_wrap(0, n, [&](size_t i) {
-                i64_input[i] = get_key(i);
-            });
-            keys = parlay::make_slice(i64_input, i64_input + n);
-            parlay::sort_inplace(keys);
+        time_start("sort", timer::current_timer);
+        parfor_wrap(0, n, [&](size_t i) {
+            i64_input[i] = get_key(i);
         });
+        slice<int64_t*, int64_t*> keys = parlay::make_slice(i64_input, i64_input + n);
+        parlay::sort_inplace(keys);
+        time_end("sort");
 
         auto keys_sorted =
             parlay::pack(keys, parlay::delayed_seq<bool>(n, [&](size_t i) {
@@ -348,7 +381,7 @@ public:
 
         auto location = parlay::sequence<int>(n);
         time_nested("taskgen", [&]() {
-            io = alloc_io_manager();
+            io = IO_Manager::alloc_io_manager();
             io->init();
             batch = io->alloc<L3_remove_task, empty_task_reply>(direct);
             batch->push_task_sorted(
@@ -392,7 +425,7 @@ public:
         int n = op_set.size();
         auto ops_merged = op_set;
 
-        time_start("find_target");
+        time_start("find_target", timer::current_timer);
         auto splits = parlay::make_slice(min_key);
         auto target = parlay::tabulate(
             nn, [&](size_t i) { return find_range_target(ops_merged[i], splits); });
@@ -418,7 +451,7 @@ public:
                                                 ops_merged[i].rkey);
                 }
             });
-            io = alloc_io_manager();
+            io = IO_Manager::alloc_io_manager();
             io->init();
             batch = io->alloc<L3_scan_task, L3_scan_reply>(direct);
             time_nested("push_task", [&]() {
@@ -431,7 +464,7 @@ public:
 
         time_nested("exec", [&]() { ASSERT(io->exec()); });
 
-        time_start("get_result");
+        time_start("get_result", timer::current_timer);
         auto kv_nums = parlay::tabulate(node_num, [&](size_t i) {
             auto reply = (L3_scan_reply*)batch->ith(target_scan[i], location[i]);
             return (reply->length);
