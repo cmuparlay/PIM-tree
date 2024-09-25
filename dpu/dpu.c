@@ -12,11 +12,7 @@
 
 #include "driver.h"
 
-#ifdef L3_SKIP_LIST
-#include "l3_skip_list.h"
-#else
 #include "l3_ab_tree.h"
-#endif
 
 #include "task.h"
 #include "bnode.h"
@@ -115,7 +111,6 @@ void execute(int l, int r) {
 
 // #ifdef DPU_INSERT
 #ifdef DPU_INIT
-#ifdef L3_SKIP_LIST
         case L3_INIT_TSK: {
             init_block_with_type(L3_init_task, empty_task_reply);
             if (tasklet_id == 0) {
@@ -125,49 +120,10 @@ void execute(int l, int r) {
             }
             break;
         }
-#else
-        case L3_INIT_TSK: {
-            init_block_with_type(L3_init_task, empty_task_reply);
-            if (tasklet_id == 0) {
-                init_task_reader(0);
-                L3_init_task* tit = (L3_init_task*)get_task_cached(0);
-                L3_init(tit);
-            }
-            break;
-        }
-#endif
 #endif
 
 // #if (defined DPU_INSERT) 
 #if (defined DPU_BUILD) || (defined DPU_INSERT) 
-#ifdef L3_SKIP_LIST
-        case L3_INSERT_TSK: {
-            init_block_with_type(L3_insert_task, empty_task_reply);
-            int64_t* keys = mem_alloc(sizeof(int64_t) * length);
-            int8_t* heights = mem_alloc(sizeof(int8_t) * length);
-            pptr* down = mem_alloc(sizeof(pptr) * length);
-
-            init_task_reader(l);
-
-            newnode_size[tasklet_id] = 0;
-            for (int i = 0; i < length; i++) {
-                L3_insert_task* tit = (L3_insert_task*)get_task_cached(i + l);
-                keys[i] = tit->key;
-                heights[i] = tit->height;
-                down[i] = tit->down;
-                newnode_size[tasklet_id] += L3_node_size(heights[i]);
-                L3_IN_DPU_ASSERT(heights[i] > 0 && heights[i] < MAX_L3_HEIGHT,
-                                 "execute: invalid height\n");
-            }
-
-            mL3ptr* right_predecessor_shared = bufferA_shared;
-            mL3ptr* right_newnode_shared = bufferB_shared;
-            L3_insert_parallel(length, l, keys, heights, down, newnode_size,
-                               max_height_shared, right_predecessor_shared,
-                               right_newnode_shared);
-            break;
-        }
-#else
         case L3_INSERT_TSK: {
             init_block_with_type(L3_insert_task, empty_task_reply);
             init_task_reader(l);
@@ -182,36 +138,8 @@ void execute(int l, int r) {
             break;
         }
 #endif
-#endif
 
 #ifdef DPU_DELETE
-#ifdef L3_SKIP_LIST
-        case L3_REMOVE_TSK: {
-            init_block_with_type(L3_remove_task, empty_task_reply);
-            int64_t* keys = mem_alloc(sizeof(int64_t) * length);
-            mL3ptr* nodes = mem_alloc(sizeof(mL3ptr) * length);
-
-            init_task_reader(l);
-            for (int i = 0; i < length; i++) {
-                L3_remove_task* trt = (L3_remove_task*)get_task_cached(i + l);
-                keys[i] = trt->key;
-                L3_search(keys[i], 0, 1, &nodes[i]);
-            }
-
-            for (int i = 0; i < length; i++) {
-                mL3ptr l3r = nodes[i];
-                IN_DPU_ASSERT_EXEC(l3r->key == keys[i], {
-                    printf("l3r: invkey=%llx\taddr=%x\tcorrectkey=%llx\n",
-                           keys[i], nodes[i], l3r->key);
-                });
-            }
-
-            mL3ptr* left_node_shared = bufferA_shared;
-            L3_remove_parallel(length, nodes, max_height_shared,
-                               left_node_shared);
-            break;
-        }
-#else
         case L3_REMOVE_TSK: {
             init_block_with_type(L3_remove_task, empty_task_reply);
 
@@ -224,21 +152,9 @@ void execute(int l, int r) {
             break;
         }
 #endif
-#endif
 
 // #ifdef DPU_PREDECESSOR
 #if (defined DPU_BUILD) || (defined DPU_PREDECESSOR)
-#ifdef L3_SKIP_LIST
-        case L3_SEARCH_TSK: {
-            init_block_with_type(L3_search_task, L3_search_reply);
-            init_task_reader(l);
-            for (int i = l; i < r; i++) {
-                L3_search_task* tst = (L3_search_task*)get_task_cached(i);
-                L3_search(tst->key, i, 0, NULL);
-            }
-            break;
-        }
-#else
         case L3_SEARCH_TSK: {
             init_block_with_type(L3_search_task, L3_search_reply);
             init_task_reader(l);
@@ -253,30 +169,8 @@ void execute(int l, int r) {
             break;
         }
 #endif
-#endif
 
 #ifdef DPU_SCAN
-#ifdef L3_SKIP_LIST
-        case L3_SCAN_TSK: {
-            init_block_with_type(L3_scan_task, L3_scan_reply);
-            init_task_reader(l);
-            varlen_buffer_dpu* addrsbuf = 
-                varlen_buffer_new_dpu(VARLEN_BUFFER_SIZE, mrambuffer + M_BUFFER_SIZE / NR_TASKLETS * tasklet_id);
-            for (int i = l; i < r; i++) {
-                L3_scan_task* l3sst = (L3_scan_task*)get_task_cached(i);
-                int64_t bb = l3sst->lkey;
-                int64_t ee = l3sst->rkey;
-                int num = L3_scan_search(bb, ee, addrsbuf);
-                // IN_DPU_ASSERT(num == addrsbuf->len && num > 0, "l3 scan search error");
-                __mram_ptr int64_t* replyptr =
-                    (__mram_ptr int64_t*)push_variable_reply_zero_copy(
-                        tasklet_id, S64(num + 1));
-                replyptr[0] = num;
-                varlen_buffer_to_mram_dpu(addrsbuf, replyptr + 1);
-            }
-            break;
-        }
-#else
         case L3_SCAN_TSK: {
             init_block_with_type(L3_scan_task, L3_scan_reply);
             init_task_reader(l);
@@ -301,7 +195,6 @@ void execute(int l, int r) {
             }
             break;
         }
-#endif
 #endif
             
         case B_GET_NODE_TSK: {
@@ -436,7 +329,7 @@ void execute(int l, int r) {
                 b_newnode(bnn, n1, n2, n3, bnt->height);
 
                 b_newnode_reply bnr = (b_newnode_reply){
-                    .addr = (pptr){.id = DPU_ID, .addr = (uint32_t)bnn}};
+                    .addr = (pptr){.id = (uint32_t)DPU_ID, .addr = (uint32_t)bnn}};
                 push_fixed_reply(i, &bnr);
             }
 #ifdef DPU_STAT_BNODE_LENGTH
@@ -529,7 +422,7 @@ void execute(int l, int r) {
 
                     b_newnode(bnn, n1, n2, n3, nn->height - 1);
                     b_insert(bnn, len, keys, addrs);
-                    pptr new_caddr = PPTR(DPU_ID, bnn);
+                    pptr new_caddr = PPTR((uint32_t)DPU_ID, bnn);
                     cache_newnode(nn, caddr, new_caddr);
                 }
             }
@@ -549,7 +442,7 @@ void execute(int l, int r) {
                 cache_insert_task* cit = (cache_insert_task*)get_task_cached(i);
                 mBptr nn = (mBptr)(cit->addr.addr);
                 nn = cache_find(nn, cit->key, cit->height);
-                pptr ad = (pptr){.id = DPU_ID, .addr = (uint32_t)nn};
+                pptr ad = (pptr){.id = (uint32_t)DPU_ID, .addr = (uint32_t)nn};
                 mram_buffer[i] = ad;
             }
 
@@ -646,7 +539,7 @@ void execute(int l, int r) {
                 int nnlen = nn->len;
                 if (nnlen > 0) {
                     nn = cache_find(nn, crt->key, crt->height);
-                    ad = (pptr){.id = DPU_ID, .addr = (uint32_t)nn};
+                    ad = (pptr){.id = (uint32_t)DPU_ID, .addr = (uint32_t)nn};
                 } else {
                     ad = null_pptr;
                 }
@@ -669,7 +562,7 @@ void execute(int l, int r) {
                     pptr ad2 = mram_buffer[i];
 // #ifdef KHB_DEBUG
 //                     nn = cache_find(nn, crt->key, crt->height);
-//                     pptr ad = (pptr){.id = DPU_ID, .addr = nn};
+//                     pptr ad = (pptr){.id = (uint32_t)DPU_ID, .addr = nn};
 //                     // m_read_single(mram_buffer + i, &ad2, sizeof(pptr));
 //                     IN_DPU_ASSERT_EXEC(equal_pptr(ad, ad2), {
 //                         int nnlen = nn->len;
@@ -996,7 +889,7 @@ void execute(int l, int r) {
                 mPptr pn = alloc_pn();
                 p_newnode(pnt->key, pnt->value, pnt->height, pn);
                 p_newnode_reply rep = (p_newnode_reply){
-                    .addr = {.id = DPU_ID, .addr = (uint32_t)pn}};
+                    .addr = {.id = (uint32_t)DPU_ID, .addr = (uint32_t)pn}};
                 push_fixed_reply(i, &rep);
             }
             break;
@@ -1099,41 +992,6 @@ void execute(int l, int r) {
 }
 
 void init() {
-#ifdef L3_SKIP_LIST
-    // #ifdef DPU_PREDECESSOR
-    //     if (DPU_ID == 0 && me() == 0) {
-    //         printf("l3_size=%d b_header_size=%d db_size=%d p_size=%d
-    //         ht_size=%d\n",
-    //                l3cnt, bcnt * sizeof(Bnode), dbcnt * sizeof(data_block),
-    //                pcnt * sizeof(Pnode), htcnt * sizeof(int64_t));
-    //     }
-    // #endif
-    switch (recv_block_task_type) {
-        case L3_INIT_TSK:
-        case L3_INSERT_TSK:
-        case L3_SEARCH_TSK:
-        case L3_REMOVE_TSK: {
-            bufferA_shared =
-                mem_alloc(sizeof(mL3ptr) * NR_TASKLETS * MAX_L3_HEIGHT);
-            bufferB_shared =
-                mem_alloc(sizeof(mL3ptr) * NR_TASKLETS * MAX_L3_HEIGHT);
-            max_height_shared = mem_alloc(sizeof(int8_t) * NR_TASKLETS);
-            newnode_size = mem_alloc(sizeof(uint32_t) * NR_TASKLETS);
-            for (int i = 0; i < NR_TASKLETS; i++) {
-                max_height_shared[i] = 0;
-            }
-            break;
-        }
-    }
-#else
-// #ifdef DPU_PREDECESSOR
-//     if (DPU_ID == 0 && me() == 0) {
-//         printf("l3_size=%d b_header_size=%d db_size=%d p_size=%d ht_size=%d\n",
-//                l3bcnt * sizeof(L3Bnode), bcnt * sizeof(Bnode),
-//                dbcnt * sizeof(data_block), pcnt * sizeof(Pnode),
-//                htcnt * sizeof(int64_t));
-//     }
-// #endif
     switch (recv_block_task_type) {
         case L3_INIT_TSK:
         case L3_INSERT_TSK:
@@ -1155,8 +1013,6 @@ void init() {
             mod_type2 = mod_type + L3_TEMP_BUFFER_SIZE_FULL;
         }
     }
-
-#endif
 }
 
 int main() {

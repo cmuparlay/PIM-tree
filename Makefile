@@ -2,7 +2,7 @@ DPU_DIR := dpu
 HOST_DIR := host
 BUILDDIR ?= build
 NR_TASKLETS ?= 12
-NR_DPUS ?= 2559
+NR_DPUS ?= 2560
 STACK_SIZE ?= 2048
 CC = g++
 
@@ -11,9 +11,22 @@ define conf_filename
 endef
 CONF := $(call conf_filename,${NR_DPUS},${NR_TASKLETS})
 
-HOST_TARGET := ${BUILDDIR}/pim_tree_host
-HOST_TARGET_NO_SHADOW_SUBTREE := ${BUILDDIR}/pim_tree_host_no_shadow_subtree
+# UPMEM src
+UPMEM_SRC_DIR := pim_base/upmem-sdk/src
+INCLUDE_UPMEM_SRC_DIR := -I${UPMEM_SRC_DIR}
+INCLUDE_UPMEM_SRC_LIBS := ${INCLUDE_UPMEM_SRC_DIR} \
+	${INCLUDE_UPMEM_SRC_DIR}/backends/api/include/api \
+	${INCLUDE_UPMEM_SRC_DIR}/backends/api/include/lowlevel \
+	${INCLUDE_UPMEM_SRC_DIR}/backends/api/src/include \
+	${INCLUDE_UPMEM_SRC_DIR}/backends/commons/include \
+	${INCLUDE_UPMEM_SRC_DIR}/backends/commons/src/properties \
+	${INCLUDE_UPMEM_SRC_DIR}/backends/hw/src/rank \
+	${INCLUDE_UPMEM_SRC_DIR}/backends/hw/src/commons \
+	${INCLUDE_UPMEM_SRC_DIR}/backends/ufi/include/ufi \
+	${INCLUDE_UPMEM_SRC_DIR}/backends/ufi/include \
+	${INCLUDE_UPMEM_SRC_DIR}/backends/verbose/src
 
+HOST_TARGET := ${BUILDDIR}/pim_tree_host
 DPU_INSERT_TARGET := ${BUILDDIR}/pim_tree_dpu_insert
 DPU_DELETE_TARGET := ${BUILDDIR}/pim_tree_dpu_delete
 DPU_SCAN_TARGET := ${BUILDDIR}/pim_tree_dpu_scan
@@ -33,6 +46,7 @@ DPU_QUERY_ENERGY_TARGET := ${DPU_QUERY_TARGET}_energy
 DPU_BUILD_ENERGY_TARGET := ${DPU_BUILD_TARGET}_energy
 DPU_INIT_ENERGY_TARGET := ${DPU_INIT_TARGET}_energy
 
+HOST_TARGET_NO_SHADOW_SUBTREE := ${BUILDDIR}/pim_tree_host_no_shadow_subtree
 DPU_INSERT_TARGET_NO_SHADOW_SUBTREE := ${BUILDDIR}/pim_tree_dpu_insert_no_shadow_subtree
 DPU_DELETE_TARGET_NO_SHADOW_SUBTREE := ${BUILDDIR}/pim_tree_dpu_delete_no_shadow_subtree
 DPU_SCAN_TARGET_NO_SHADOW_SUBTREE := ${BUILDDIR}/pim_tree_dpu_scan_no_shadow_subtree
@@ -41,15 +55,6 @@ DPU_GET_UPDATE_TARGET_NO_SHADOW_SUBTREE := ${BUILDDIR}/pim_tree_dpu_get_update_n
 DPU_QUERY_TARGET_NO_SHADOW_SUBTREE := ${BUILDDIR}/pim_tree_dpu_query_no_shadow_subtree
 DPU_BUILD_TARGET_NO_SHADOW_SUBTREE := ${BUILDDIR}/pim_tree_dpu_build_no_shadow_subtree
 DPU_INIT_TARGET_NO_SHADOW_SUBTREE := ${BUILDDIR}/pim_tree_dpu_init_no_shadow_subtree
-
-DPU_INSERT_TARGET := ${BUILDDIR}/pim_tree_dpu_insert
-DPU_DELETE_TARGET := ${BUILDDIR}/pim_tree_dpu_delete
-DPU_SCAN_TARGET := ${BUILDDIR}/pim_tree_dpu_scan
-DPU_PREDECESSOR_TARGET := ${BUILDDIR}/pim_tree_dpu_predecessor
-DPU_GET_UPDATE_TARGET := ${BUILDDIR}/pim_tree_dpu_get_update
-DPU_QUERY_TARGET := ${BUILDDIR}/pim_tree_dpu_query
-DPU_BUILD_TARGET := ${BUILDDIR}/pim_tree_dpu_build
-DPU_INIT_TARGET := ${BUILDDIR}/pim_tree_dpu_init
 
 COMMON_INCLUDES := common
 COMMON_INCLUDE_SOURCES := $(wildcard ${COMMON_INCLUDES}/*.h)
@@ -62,10 +67,9 @@ DPU_SOURCES := $(wildcard ${DPU_DIR}/*.c)
 
 __dirs := $(shell mkdir -p ${BUILDDIR})
 
-OLD_COMMON_FLAGS := -Wall -Wextra -Werror -g -I${COMMON_INCLUDES}
 COMMON_FLAGS := -Wall -Wextra -g -I${COMMON_INCLUDES} -Ipim_base/include/common
-HOST_LIB_FLAGS := -isystem pim_base/argparse/include -isystem pim_base/parlaylib/include  -Ipim_base/include/host -Ipim_base/timer_tree/include -lpapi -lstdc++fs
-HOST_FLAGS := ${COMMON_FLAGS} -std=c++17 -lpthread -O3 -I${HOST_DIR} ${HOST_LIB_FLAGS} `dpu-pkg-config --cflags --libs dpu` -DNR_TASKLETS=${NR_TASKLETS} -DNR_DPUS=${NR_DPUS}
+HOST_LIB_FLAGS := -isystem pim_base/argparse/include -isystem pim_base/parlaylib/include  -Ipim_base/include/host -Ipim_base/timer_tree/include ${INCLUDE_UPMEM_SRC_LIBS} -Ipim_base/pim_interface -lpapi -lstdc++fs
+HOST_FLAGS := ${COMMON_FLAGS} -std=c++17 -lpthread -O0 -I${HOST_DIR} ${HOST_LIB_FLAGS} `dpu-pkg-config --cflags --libs dpu` -march=native -DNR_TASKLETS=${NR_TASKLETS} -DNR_DPUS=${NR_DPUS} -DDIRECT_INTERFACE
 DPU_LIB_FLAGS := -Ipim_base/include/dpu
 DPU_FLAGS := ${COMMON_FLAGS} -I${DPU_DIR} ${DPU_LIB_FLAGS} -DSTACK_SIZE_DEFAULT=${STACK_SIZE} -DNR_TASKLETS=${NR_TASKLETS} -Oz
 

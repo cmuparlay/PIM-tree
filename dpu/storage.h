@@ -1,10 +1,6 @@
 #pragma once
 
-#ifdef L3_SKIP_LIST
-#include "l3_skip_list.h"
-#else
 #include "l3_ab_tree.h"
-#endif
 
 #include "bnode.h"
 #include "hashtable_l3size.h"
@@ -17,11 +13,7 @@ __mram_noinit Bnode bbuffer_tmp[B_BUFFER_SIZE / sizeof(Bnode)];
 __mram_noinit cache_init_record cirbuffer_tmp[CACHE_INIT_RECORD_SIZE / sizeof(cache_init_record)];
 __mram_noinit data_block dbbuffer_tmp[DB_BUFFER_SIZE / sizeof(data_block)];
 
-#ifdef L3_SKIP_LIST
-__mram_noinit uint8_t l3buffer_tmp[L3_BUFFER_SIZE];
-#else
 __mram_noinit L3Bnode l3bbuffer_tmp[L3_BUFFER_SIZE / sizeof(L3Bnode)];
-#endif
 
 __mram_noinit Pnode pbuffer_tmp[P_BUFFER_SIZE / sizeof(Pnode)];
 __mram_noinit ht_slot ht_tmp[LX_HASHTABLE_SIZE];
@@ -30,11 +22,7 @@ __mram_noinit uint8_t send_varlen_buffer_tmp[NR_TASKLETS][MAX_TASK_BUFFER_SIZE_P
 
 // dpu.c
 extern int64_t DPU_ID; // = -1;
-#ifdef L3_SKIP_LIST
-extern mL3ptr root;
-#else
 extern mL3Bptr root;
-#endif
 extern bool wram_init_flag;
 
 // bnode.h
@@ -56,15 +44,9 @@ extern mdbptr dbbuffer;
 // __mram_noinit data_block dbbuffer[DB_BUFFER_SIZE / sizeof(data_block)];
 
 // l3.h
-#ifdef L3_SKIP_LIST
-extern uint32_t l3cnt; // = 8;
-extern mpuint8_t l3buffer;
-// __mram_noinit uint8_t l3buffer[L3_BUFFER_SIZE];
-#else
 extern uint32_t l3bcnt; // = 1;
 extern mL3Bptr l3bbuffer;
 // __mram_noinit L3Bnode l3bbuffer[L3_BUFFER_SIZE / sizeof(L3Bnode)];
-#endif
 
 // pnode.h
 extern uint32_t pcnt; // = 1;
@@ -97,13 +79,10 @@ extern gcnode free_list_l3bnode;
 extern gcnode free_list_data_block;
 
 typedef struct WRAMHeap {
+    int64_t padding_for_empty_pos;
 
     int64_t DPU_ID;
-    #ifdef L3_SKIP_LIST
-    mL3ptr root;
-    #else
     mL3Bptr root;
-    #endif
 
     uint32_t bcnt;
     mBptr bbuffer;
@@ -120,15 +99,10 @@ typedef struct WRAMHeap {
     mdbptr dbbuffer_start;
     mdbptr dbbuffer_end;
     
-    #ifdef L3_SKIP_LIST
-    uint32_t l3cnt;
-    mpuint8_t l3buffer;
-    #else
     uint32_t l3bcnt;
     mL3Bptr l3bbuffer;
     mL3Bptr l3bbuffer_start;
     mL3Bptr l3bbuffer_end;
-    #endif
 
     uint32_t pcnt;
     mPptr pbuffer;
@@ -178,15 +152,10 @@ void wram_heap_save() {
         .dbbuffer = dbbuffer,
         .dbbuffer_start = dbbuffer_start,
         .dbbuffer_end = dbbuffer_end,
-        #ifdef L3_SKIP_LIST
-        .l3cnt = l3cnt,
-        .l3buffer = l3buffer,
-        #else
         .l3bcnt = l3bcnt,
         .l3bbuffer = l3bbuffer,
         .l3bbuffer_start = l3bbuffer_start,
         .l3bbuffer_end = l3bbuffer_end,
-        #endif
         .pcnt = pcnt,
         .pbuffer = pbuffer,
         .pbuffer_start = pbuffer_start,
@@ -224,11 +193,7 @@ void wram_heap_init() {
     dbbuffer = dbbuffer_tmp;
     pbuffer = pbuffer_tmp;
     
-    #ifdef L3_SKIP_LIST
-    l3buffer = l3buffer_tmp;
-    #else
     l3bbuffer = l3bbuffer_tmp;
-    #endif
     ht = ht_tmp;
     
     statistic_init();
@@ -264,15 +229,10 @@ void wram_heap_load() {
         dbbuffer = heapInfo.dbbuffer;
         dbbuffer_start = heapInfo.dbbuffer_start;
         dbbuffer_end = heapInfo.dbbuffer_end;
-        #ifdef L3_SKIP_LIST
-        l3cnt = heapInfo.l3cnt;
-        l3buffer = heapInfo.l3buffer;
-        #else
         l3bcnt = heapInfo.l3bcnt;
         l3bbuffer = heapInfo.l3bbuffer;
         l3bbuffer_start = heapInfo.l3bbuffer_start;
         l3bbuffer_end = heapInfo.l3bbuffer_end;
-        #endif
         pcnt = heapInfo.pcnt;
         pbuffer = heapInfo.pbuffer;
         pbuffer_start = heapInfo.pbuffer_start;

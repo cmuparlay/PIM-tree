@@ -7,32 +7,30 @@
 #include "debug.hpp"
 #include "dpu_control.hpp"
 #include "operation_def.hpp"
-#include "oracle.hpp"
+#include "index_interface.hpp"
 #include "papi_counters.hpp"
 #include "task.hpp"
 #include "task_framework_host.hpp"
 #include "value.hpp"
 #include "add_parlay_lib.hpp"
+#include "parlay/utilities.h"
 using namespace std;
 
-static inline int hh(int64_t key, uint64_t height, uint64_t M) {
-    uint64_t v = parlay::hash64((uint64_t)key) + height;
-    v = parlay::hash64(v);
-    return v % M;
-}
+class PIMTreeIndex {
+   private:
+    static inline int hh(int64_t key, uint64_t height, uint64_t M) {
+        uint64_t v = parlay::hash64((uint64_t)key) + height;
+        v = parlay::hash64(v);
+        return v % M;
+    }
 
-static inline int hash_to_dpu(int64_t key, uint64_t height, uint64_t M) {
-    return hh(key, height, M);
-}
+    static inline int hash_to_dpu(int64_t key, uint64_t height, uint64_t M) {
+        return hh(key, height, M);
+    }
 
-class pim_skip_list {
    public:
-
     // definition & const
-    enum predecessor_type {
-        predecessor_insert,
-        predecessor_only
-    };
+    enum predecessor_type { predecessor_insert, predecessor_only };
     static constexpr int push_pull_limit = L2_SIZE * 2;
     const double bias_limit = 3;
     const int max_l3_height = 14;
@@ -61,6 +59,7 @@ class pim_skip_list {
         return valid_pptr(x) && in_pbuffer(x.addr);
     }
     inline static mutex mut;
+    inline static shared_mutex op_mutex;
 
     // parameters for evaluation
     int push_pull_limit_dynamic = L2_SIZE;
@@ -78,7 +77,7 @@ class pim_skip_list {
     int64_t i64_output[BATCH_SIZE];
 
     // io internal
-    pair<int, int64_t> keys_with_offset_sorted[BATCH_SIZE];
+    std::pair<int64_t, int64_t> keys_with_offset_sorted[BATCH_SIZE];
 
     // member
     pptr op_addrs[BATCH_SIZE];
@@ -93,10 +92,185 @@ class pim_skip_list {
     int l2_addrs_taskpos_buf[BATCH_SIZE * 2];
     int insert_truncate_taskpos_buf[BATCH_SIZE * 2];
 
+    void SetPushPullLimit(size_t limit) {
+        push_pull_limit_dynamic = push_pull_limit;
+    }
+
+    void Init() {
+        time_nested("Init DPUs", [&]() {
+            cpu_coverage_timer->start();
+            dpu_binary_switch_to(dpu_binary::init_binary);
+            init_wram_save_pos();
+            init_dpus();
+            cpu_coverage_timer->end();
+            cpu_coverage_timer->reset();
+            pim_coverage_timer->reset();
+        });
+
+        time_nested("Init Skiplist", [&]() {
+            {
+                cpu_coverage_timer->start();
+                init_skiplist();
+                cpu_coverage_timer->end();
+                cpu_coverage_timer->reset();
+                pim_coverage_timer->reset();
+            }
+        });
+    }
+
+    void init_dpus() {
+        printf("\n********** INIT DPUS **********\n");
+        auto io = IO_Manager::alloc_io_manager();
+        ASSERT(io == IO_Manager::io_managers[0]);
+        io->init();
+        IO_Task_Batch* batch = io->alloc<dpu_init_task, dpu_init_reply>(direct);
+
+        parlay::parallel_for(0, nr_of_dpus, [&](size_t i) {
+            auto it = (dpu_init_task*)batch->push_task_zero_copy(i, -1, false);
+            *it = (dpu_init_task){.dpu_id = (int64_t)i};
+        });
+        io->finish_task_batch();
+        ASSERT(io->exec());
+
+        dpu_init_reply *ir = (dpu_init_reply *)batch->ith(0, 0);
+        PIMTreeIndex::dpu_memory_regions& dmr = PIMTreeIndex::dmr;
+        dmr.bbuffer_start = ir->bbuffer_start;
+        dmr.bbuffer_end = ir->bbuffer_end;
+        dmr.pbuffer_start = ir->pbuffer_start;
+        dmr.pbuffer_end = ir->pbuffer_end;
+    #ifdef KHB_CPU_DEBUG
+        printf("bbuffer:\nstart=%x\nend=%x\n\n", dmr.bbuffer_start,
+            dmr.bbuffer_end);
+        printf("pbuffer:\nstart=%x\nend=%x\n\n", dmr.pbuffer_start,
+            dmr.pbuffer_end);
+        for (int id = 1; id < nr_of_dpus; id++) {
+            dpu_init_reply *ir = (dpu_init_reply *)batch->ith(id, 0);
+            ASSERT(dmr.bbuffer_start == ir->bbuffer_start);
+            ASSERT(dmr.bbuffer_end == ir->bbuffer_end);
+            ASSERT(dmr.pbuffer_start == ir->pbuffer_start);
+            ASSERT(dmr.pbuffer_end == ir->pbuffer_end);
+        }
+    #endif
+        io->reset();
+    }
+
+    void init_skiplist() {
+        dpu_binary_switch_to(dpu_binary::init_binary);
+
+        int l3_height = max_l3_height;
+        ASSERT(l3_height > 0);
+
+        printf("\n********** INIT SKIP LIST **********\n");
+
+        pptr l3node = null_pptr;
+        pptr l2nodes[L2_HEIGHT] = {null_pptr};
+        pptr l1node = null_pptr;
+
+        // insert nodes
+        time_nested("nodes", [&]() {
+            auto io = IO_Manager::alloc_io_manager();
+            // ASSERT(io == IO_Manager::io_managers[0]);
+            io->init();
+
+            auto L2_init_batch =
+                io->alloc<b_newnode_task, b_newnode_reply>(direct);
+            {
+                auto batch = L2_init_batch;
+                for (int ht = 0; ht < L2_HEIGHT; ht++) {
+                    int target = hash_to_dpu(INT64_MIN, ht, nr_of_dpus);
+                    b_newnode_task *bnt =
+                        (b_newnode_task *)batch->push_task_zero_copy(
+                            target, -1, true, op_taskpos + ht);
+                    *bnt = (b_newnode_task){{.height = ht}};
+                }
+                io->finish_task_batch();
+            }
+
+            auto L1_init_batch = io->alloc_task_batch(
+                direct, fixed_length, fixed_length, P_NEWNODE_TSK,
+                sizeof(p_newnode_task), sizeof(p_newnode_reply));
+            {
+                auto batch = L1_init_batch;
+                int target = hash_to_dpu(INT64_MIN, 0, nr_of_dpus);
+                p_newnode_task *pnt =
+                    (p_newnode_task *)batch->push_task_zero_copy(target, -1,
+                                                                 false);
+                pnt->key = INT64_MIN;
+                pnt->height = l3_height + L2_HEIGHT;
+                io->finish_task_batch();
+            }
+
+            time_nested("exec", [&]() { ASSERT(io->exec()); });
+
+            {
+                auto batch = L2_init_batch;
+                for (int ht = 0; ht < L2_HEIGHT; ht++) {
+                    int target = hash_to_dpu(INT64_MIN, ht, nr_of_dpus);
+                    b_newnode_reply *rep = (b_newnode_reply *)batch->get_reply(
+                        op_taskpos[ht], target);
+                    l2nodes[ht] = rep->addr;
+                }
+            }
+            {
+                auto batch = L1_init_batch;
+                int target = hash_to_dpu(INT64_MIN, 0, nr_of_dpus);
+                p_newnode_reply *rep =
+                    (p_newnode_reply *)batch->get_reply(0, target);
+                l1node = rep->addr;
+            }
+            io->reset();
+        });
+
+        memset(l2_root_count, 0, sizeof(l2_root_count));
+        l2_root_count[l2nodes[L2_HEIGHT - 1].id]++;
+
+        // build up down pointers
+        time_nested("ud ptrs", [&]() {
+            auto io = IO_Manager::alloc_io_manager();
+            // ASSERT(io == IO_Manager::io_managers[0]);
+            io->init();
+            auto L3_init_batch =
+                io->alloc<L3_init_task, empty_task_reply>(broadcast);
+            {
+                auto batch = L3_init_batch;
+                L3_init_task *tit =
+                    (L3_init_task *)batch->push_task_zero_copy(-1, -1, false);
+                *tit = (L3_init_task){{.key = INT64_MIN,
+                                       .height = l3_height,
+                                       .down = l2nodes[L2_HEIGHT - 1]}};
+                io->finish_task_batch();
+            }
+
+            auto L2_insert_batch = io->alloc_task_batch(
+                direct, variable_length, fixed_length, B_INSERT_TSK, -1, 0);
+            {
+                auto batch = L2_insert_batch;
+                for (int i = 0; i < L2_HEIGHT; i++) {
+                    int len = 1;
+                    int target = hash_to_dpu(INT64_MIN, i, nr_of_dpus);
+                    b_insert_task *bit =
+                        (b_insert_task *)batch->push_task_zero_copy(
+                            target, S64(2 + 1 * 2), false);
+                    bit->addr = l2nodes[i];
+                    bit->len = len;
+                    bit->vals[0] = LLONG_MIN;
+                    pptr down = (i == 0) ? l1node : l2nodes[i - 1];
+                    memcpy(&(bit->vals[1]), &down, S64(1));
+                }
+                io->finish_task_batch();
+            }
+            time_nested("exec", [&]() { ASSERT(!io->exec()); });
+            io->reset();
+        });
+
+        dpu_binary_switch_to(dpu_binary::insert_binary);
+        time_nested("build cache", [&]() { build_cache(); });
+    }
+
     void build_cache() {
         for (int round = 0; round < 1; round++) {
-            auto io = alloc_io_manager();
-            // ASSERT(io == io_managers[0]);
+            auto io = IO_Manager::alloc_io_manager();
+            // ASSERT(io == IO_Manager::io_managers[0]);
             io->init();
 
             auto cache_init_request_batch = io->alloc_task_batch(
@@ -169,8 +343,8 @@ class pim_skip_list {
             io->reset();
             io = nullptr;
 
-            io = alloc_io_manager();
-            // ASSERT(io == io_managers[0]);
+            io = IO_Manager::alloc_io_manager();
+            // ASSERT(io == IO_Manager::io_managers[0]);
             io->init();
 
             auto cache_init_getnode_batch = io->alloc_task_batch(
@@ -190,8 +364,8 @@ class pim_skip_list {
 
             time_nested("cache init getnode", [&]() { ASSERT(io->exec()); });
 
-            auto io2 = alloc_io_manager();
-            ASSERT(io2 == io_managers[1]);
+            auto io2 = IO_Manager::alloc_io_manager();
+            ASSERT(io2 == IO_Manager::io_managers[1]);
             io2->init();
 
             auto cache_init_newnode =
@@ -229,131 +403,6 @@ class pim_skip_list {
         }
     }
 
-    void init_skiplist() {
-        dpu_binary_switch_to(dpu_binary::init_binary);
-
-        int l3_height = max_l3_height;
-        ASSERT(l3_height > 0);
-
-        printf("\n********** INIT SKIP LIST **********\n");
-
-        pptr l3node = null_pptr;
-        pptr l2nodes[L2_HEIGHT] = {null_pptr};
-        pptr l1node = null_pptr;
-
-        // insert nodes
-        time_nested("nodes", [&]() {
-            auto io = alloc_io_manager();
-            // ASSERT(io == io_managers[0]);
-            io->init();
-
-            auto L2_init_batch =
-                io->alloc<b_newnode_task, b_newnode_reply>(direct);
-            {
-                auto batch = L2_init_batch;
-                for (int ht = 0; ht < L2_HEIGHT; ht++) {
-                    int target = hash_to_dpu(INT64_MIN, ht, nr_of_dpus);
-                    b_newnode_task *bnt =
-                        (b_newnode_task *)batch->push_task_zero_copy(
-                            target, -1, true, op_taskpos + ht);
-                    *bnt = (b_newnode_task){{.height = ht}};
-                }
-                io->finish_task_batch();
-            }
-
-            auto L1_init_batch = io->alloc_task_batch(
-                direct, fixed_length, fixed_length, P_NEWNODE_TSK,
-                sizeof(p_newnode_task), sizeof(p_newnode_reply));
-            {
-                auto batch = L1_init_batch;
-                int target = hash_to_dpu(INT64_MIN, 0, nr_of_dpus);
-                p_newnode_task *pnt =
-                    (p_newnode_task *)batch->push_task_zero_copy(target, -1,
-                                                                 false);
-                pnt->key = INT64_MIN;
-                pnt->height = l3_height + L2_HEIGHT;
-                io->finish_task_batch();
-            }
-
-            time_nested("exec", [&]() { ASSERT(io->exec()); });
-
-            {
-                auto batch = L2_init_batch;
-                for (int ht = 0; ht < L2_HEIGHT; ht++) {
-                    int target = hash_to_dpu(INT64_MIN, ht, nr_of_dpus);
-                    b_newnode_reply *rep = (b_newnode_reply *)batch->get_reply(
-                        op_taskpos[ht], target);
-                    l2nodes[ht] = rep->addr;
-                }
-            }
-            {
-                auto batch = L1_init_batch;
-                int target = hash_to_dpu(INT64_MIN, 0, nr_of_dpus);
-                p_newnode_reply *rep =
-                    (p_newnode_reply *)batch->get_reply(0, target);
-                l1node = rep->addr;
-            }
-            io->reset();
-        });
-
-        memset(l2_root_count, 0, sizeof(l2_root_count));
-        l2_root_count[l2nodes[L2_HEIGHT - 1].id]++;
-
-        // build up down pointers
-        time_nested("ud ptrs", [&]() {
-            auto io = alloc_io_manager();
-            // ASSERT(io == io_managers[0]);
-            io->init();
-            auto L3_init_batch =
-                io->alloc<L3_init_task, empty_task_reply>(broadcast);
-            {
-                auto batch = L3_init_batch;
-                L3_init_task *tit =
-                    (L3_init_task *)batch->push_task_zero_copy(-1, -1, false);
-                *tit = (L3_init_task){{.key = INT64_MIN,
-                                       .height = l3_height,
-                                       .down = l2nodes[L2_HEIGHT - 1]}};
-                io->finish_task_batch();
-            }
-
-            auto L2_insert_batch = io->alloc_task_batch(
-                direct, variable_length, fixed_length, B_INSERT_TSK, -1, 0);
-            {
-                auto batch = L2_insert_batch;
-                for (int i = 0; i < L2_HEIGHT; i++) {
-                    int len = 1;
-                    int target = hash_to_dpu(INT64_MIN, i, nr_of_dpus);
-                    b_insert_task *bit =
-                        (b_insert_task *)batch->push_task_zero_copy(
-                            target, S64(2 + 1 * 2), false);
-                    bit->addr = l2nodes[i];
-                    bit->len = len;
-                    bit->vals[0] = LLONG_MIN;
-                    pptr down = (i == 0) ? l1node : l2nodes[i - 1];
-                    memcpy(&(bit->vals[1]), &down, S64(1));
-                }
-                io->finish_task_batch();
-            }
-            time_nested("exec", [&]() { ASSERT(!io->exec()); });
-            io->reset();
-        });
-
-        dpu_binary_switch_to(dpu_binary::insert_binary);
-        time_nested("build cache", [&]() { build_cache(); });
-    }
-
-    void init() {
-        time_nested("init_skiplist", [&]() {
-            {
-                cpu_coverage_timer->start();
-                init_skiplist();
-                cpu_coverage_timer->end();
-                cpu_coverage_timer->reset();
-                pim_coverage_timer->reset();
-            }
-        });
-    }
-
     template <class TT>
     struct copy_scan {
         using T = TT;
@@ -377,7 +426,8 @@ class pim_skip_list {
 
     // 27 bytes per element
     bool predecessor_l2_one_round_task_start[BATCH_SIZE];
-    uint32_t predecessor_l2_one_round_ll[BATCH_SIZE]; // reused by predecessor_core_ll
+    uint32_t predecessor_l2_one_round_ll[BATCH_SIZE];  // reused by
+                                                       // predecessor_core_ll
     uint32_t predecessor_l2_one_round_rr[BATCH_SIZE];
     bool predecessor_l2_one_round_split_start[BATCH_SIZE];
     uint32_t predecessor_l2_one_round_split_ll[BATCH_SIZE];
@@ -398,9 +448,10 @@ class pim_skip_list {
 #endif
 
         // task starts
-        time_start("init");
-        auto task_start = parlay::make_slice(predecessor_l2_one_round_task_start,
-                predecessor_l2_one_round_task_start + length);
+        time_start("init", timer::current_timer);
+        auto task_start =
+            parlay::make_slice(predecessor_l2_one_round_task_start,
+                               predecessor_l2_one_round_task_start + length);
         {
             task_start[0] = true;
             parlay::parallel_for(1, length, [&](size_t i) {
@@ -408,7 +459,9 @@ class pim_skip_list {
             });
         }
 
-        auto ll_full_slice = parlay::make_slice(predecessor_l2_one_round_ll, predecessor_l2_one_round_ll + BATCH_SIZE);
+        auto ll_full_slice =
+            parlay::make_slice(predecessor_l2_one_round_ll,
+                               predecessor_l2_one_round_ll + BATCH_SIZE);
         auto llen = parlay::pack_index_into(task_start, ll_full_slice);
         auto ll = ll_full_slice.cut(0, llen);
 
@@ -430,28 +483,29 @@ class pim_skip_list {
             ll = ll_full_slice.cut(0, llen);
         }
 
-        auto rr = parlay::make_slice(predecessor_l2_one_round_rr, predecessor_l2_one_round_rr + length);
-        { // initialize rr[]
-            parlay::parallel_for(0, length, [&](size_t i) {
-                rr[i] = -1;
-            });
-            parlay::parallel_for(0, llen - 1, [&](size_t i) {
-                rr[ll[i]] = ll[i + 1];
-            });
+        auto rr = parlay::make_slice(predecessor_l2_one_round_rr,
+                                     predecessor_l2_one_round_rr + length);
+        {  // initialize rr[]
+            parlay::parallel_for(0, length, [&](size_t i) { rr[i] = -1; });
+            parlay::parallel_for(0, llen - 1,
+                                 [&](size_t i) { rr[ll[i]] = ll[i + 1]; });
             rr[ll[llen - 1]] = length;
         }
 
-        auto split_start = parlay::make_slice(predecessor_l2_one_round_split_start,
-                predecessor_l2_one_round_split_start + length);
+        auto split_start =
+            parlay::make_slice(predecessor_l2_one_round_split_start,
+                               predecessor_l2_one_round_split_start + length);
         {
-            parlay::parallel_for(0, length, [&](size_t i) {
-                split_start[i] = task_start[i] && in_bbuffer(op_addrs[i].addr) &&
-                   (rr[i] - i > limit);
+            parlay::parallel_for(0, length, [&](uint32_t i) {
+                split_start[i] = task_start[i] &&
+                                 in_bbuffer(op_addrs[i].addr) &&
+                                 (rr[i] - i > limit);
             });
         }
 
-        auto split_ll = parlay::make_slice(predecessor_l2_one_round_split_ll,
-                predecessor_l2_one_round_split_ll + BATCH_SIZE);
+        auto split_ll =
+            parlay::make_slice(predecessor_l2_one_round_split_ll,
+                               predecessor_l2_one_round_split_ll + BATCH_SIZE);
         uint32_t split_llen = 0;
 
         if (split) {
@@ -466,17 +520,20 @@ class pim_skip_list {
 
         ASSERT(!shadow_shortcut || split_llen == 0);
 
-        auto search_start = parlay::make_slice(predecessor_l2_one_round_search_start,
-                predecessor_l2_one_round_search_start + length);
+        auto search_start =
+            parlay::make_slice(predecessor_l2_one_round_search_start,
+                               predecessor_l2_one_round_search_start + length);
         {
             parlay::parallel_for(0, length, [&](size_t i) {
-                search_start[i] = task_start[i] && in_bbuffer(op_addrs[i].addr) &&
-                   (rr[i] - i <= limit);
+                search_start[i] = task_start[i] &&
+                                  in_bbuffer(op_addrs[i].addr) &&
+                                  (rr[i] - i <= limit);
             });
         }
 
-        auto search_ll = parlay::make_slice(predecessor_l2_one_round_search_ll,
-                predecessor_l2_one_round_search_ll + BATCH_SIZE);
+        auto search_ll =
+            parlay::make_slice(predecessor_l2_one_round_search_ll,
+                               predecessor_l2_one_round_search_ll + BATCH_SIZE);
         uint32_t search_llen = 0;
 
         if (search) {
@@ -501,12 +558,11 @@ class pim_skip_list {
             split = false;
         }
 
-        auto this_ll = parlay::make_slice(predecessor_l2_one_round_this_ll,
-                predecessor_l2_one_round_this_ll + length);
+        auto this_ll =
+            parlay::make_slice(predecessor_l2_one_round_this_ll,
+                               predecessor_l2_one_round_this_ll + length);
         {
-            parlay::parallel_for(0, length, [&](size_t i) {
-                this_ll[i] = -1;
-            });
+            parlay::parallel_for(0, length, [&](size_t i) { this_ll[i] = -1; });
         }
 
         parfor_wrap(0, llen, [&](size_t i) {
@@ -528,8 +584,9 @@ class pim_skip_list {
 
         parlay::scan_inclusive_inplace(this_ll, copy_scan<int>());
 
-        auto active_pos = parlay::make_slice(predecessor_l2_one_round_active_pos,
-                predecessor_l2_one_round_active_pos + length);
+        auto active_pos =
+            parlay::make_slice(predecessor_l2_one_round_active_pos,
+                               predecessor_l2_one_round_active_pos + length);
         uint32_t active_pos_len = 0;
         {
             active_pos_len = parlay::pack_index_into(
@@ -607,8 +664,8 @@ class pim_skip_list {
         }
 #endif
 
-        auto io = alloc_io_manager();
-        // ASSERT(io == io_managers[0]);
+        auto io = IO_Manager::alloc_io_manager();
+        // ASSERT(io == IO_Manager::io_managers[0]);
         io->init();
 
         // split
@@ -781,6 +838,8 @@ class pim_skip_list {
                     offset_pptr *task_op = bsr->ops;
                     for (int j = 0; j < bsr->len; j++) {
                         int off = task_op[j].offset + loop_l;
+                        ASSERT(task_op[j].offset < len);
+                        ASSERT(off < loop_r && off >= loop_l);
                         pptr ad = (pptr){.id = task_op[j].id,
                                          .addr = task_op[j].addr};
                         ASSERT_EXEC(in_pbuffer(ad.addr) || in_bbuffer(ad.addr),
@@ -788,7 +847,6 @@ class pim_skip_list {
                                         printf("loop_l=%d off=%d pptr=%llx\n",
                                                loop_l, off, pptr_to_int64(ad));
                                     });
-
                         op_addrs[off] = ad;
                         if (!in_bbuffer(ad.addr)) {
                             continue;
@@ -805,16 +863,19 @@ class pim_skip_list {
                                 ASSERT_EXEC(k != 0, {
                                     for (int kk = 0; kk < bsr->len; kk++) {
                                         int off = task_op[kk].offset + loop_l;
-                                        pptr ad = ((pptr){.id = task_op[kk].id,
-                                                   .addr = task_op[kk].addr});
+                                        pptr ad =
+                                            ((pptr){.id = task_op[kk].id,
+                                                    .addr = task_op[kk].addr});
                                         printf("j=%d ad=%lx\n", off,
                                                pptr_to_int64(ad));
                                     }
-                                    for (int kk = L2_HEIGHT - 1; kk >= 0; kk--) {
+                                    for (int kk = L2_HEIGHT - 1; kk >= 0;
+                                         kk--) {
                                         printf("j=%d kk=%d path=%lx\n", off, kk,
                                                pptr_to_int64(paths[off][kk]));
                                     }
-                                    printf("j=%d path=%lx\n", off, pptr_to_int64(ad));
+                                    printf("j=%d path=%lx\n", off,
+                                           pptr_to_int64(ad));
                                     fflush(stdout);
                                     dpu_control::print_log([](size_t i) {
                                         (void)i;
@@ -826,6 +887,13 @@ class pim_skip_list {
                     }
 #ifdef KHB_CPU_DEBUG
                     for (int j = loop_l; j < loop_r; j++) {
+                        if (heights[j] != 1) {
+                            ASSERT(heights[j] == L2_HEIGHT);
+                            for (int k = 0; k < L2_HEIGHT; k++) {
+                                ASSERT(valid_b_pptr(paths[j][k]) ||
+                                       valid_p_pptr(paths[j][k]));
+                            }
+                        }
                         ASSERT_EXEC(valid_pptr(op_addrs[j]), {
                             mut.lock();
                             for (int xx = loop_l; xx < loop_r; xx++) {
@@ -900,7 +968,7 @@ class pim_skip_list {
         printf("bias: %lf\n", bias);
 #endif
         if (bias < bias_limit) {
-            auto io = alloc_io_manager();
+            auto io = IO_Manager::alloc_io_manager();
             io->init();
             auto L1_search_batch = io->alloc_task_batch(
                 direct, fixed_length, fixed_length, B_FIXED_SEARCH_TSK,
@@ -1016,8 +1084,8 @@ class pim_skip_list {
 
         papi_start_global_counters(l3counters);
         time_nested("L3", [&]() {
-            auto io = alloc_io_manager();
-            // ASSERT(io == io_managers[0]);
+            auto io = IO_Manager::alloc_io_manager();
+            // ASSERT(io == IO_Manager::io_managers[0]);
             io->init();
 
             auto L3_predecessor_batch = io->alloc_task_batch(
@@ -1154,7 +1222,7 @@ class pim_skip_list {
             papi_start_global_counters(datacounters1);
 
             time_nested("data nodes", [&]() {
-                time_start("init");
+                time_start("init", timer::current_timer);
                 auto task_starts =
                     parlay::delayed_seq<bool>(length, [&](size_t i) {
                         return i == 0 ||
@@ -1166,8 +1234,8 @@ class pim_skip_list {
                 ll = ll.cut(0, llen);
                 time_end("init");
 
-                auto io = alloc_io_manager();
-                // ASSERT(io == io_managers[0]);
+                auto io = IO_Manager::alloc_io_manager();
+                // ASSERT(io == IO_Manager::io_managers[0]);
                 io->init();
                 auto L1_search_batch =
                     io->alloc<p_get_key_task, p_get_key_reply>(direct);
@@ -1202,9 +1270,8 @@ class pim_skip_list {
 
                 papi_start_global_counters(datacounters3);
                 auto off = parlay::delayed_seq<int>(
-                    length_before_deduplication, [&](size_t i) {
-                        return back_trace_offset[i];
-                    });
+                    length_before_deduplication,
+                    [&](size_t i) { return back_trace_offset[i]; });
                 time_nested("get result", [&]() {
                     auto batch = L1_search_batch;
                     parfor_wrap(0, llen, [&](size_t i) {
@@ -1218,8 +1285,7 @@ class pim_skip_list {
                                 ? length_before_deduplication
                                 : back_trace_offset_startpos[ll[i + 1]];
                         parfor_wrap(result_l, result_r, [&](size_t x) {
-                            kv_output[off[x]] = (key_value){
-                                .key = pgkr->key, .value = pgkr->value};
+                            kv_output[off[x]] = (key_value)(pgkr->key, pgkr->value);
                         });
                     });
                 });
@@ -1230,42 +1296,47 @@ class pim_skip_list {
         papi_stop_global_counters(datacounters);
     }
 
-    void get_load(slice<int64_t *, int64_t *> keys) {
-        int n = keys.size();
-        length = n;
+    template<typename GetKeyF>
+    std::pair<key_value*, size_t> RunBatchGet(size_t batch_size, GetKeyF get_key) {
+        size_t n = length = batch_size;
 
-        parlay::parallel_for(0, n, [&](size_t i) {
-            keys_with_offset_sorted[i] = make_pair(i, keys[i]);
+        parlay::sequence<uint32_t> ll;
+        size_t llen = 0;
+        int64_t* keys_sorted = i64_input;
+
+        time_nested("Load", [&]() {
+            parlay::parallel_for(0, n, [&](size_t i) {
+                keys_with_offset_sorted[i] = make_pair(i, get_key(i));
+            });
+
+            auto kwos_slice = parlay::make_slice(keys_with_offset_sorted,
+                                                keys_with_offset_sorted + n);
+            time_nested("sort", [&]() {
+                parlay::sort_inplace(kwos_slice,
+                                    [](const auto &t1, const auto &t2) {
+                                        return t1.second < t2.second;
+                                    });
+            });
+            
+            parlay::parallel_for(0, n, [&](size_t i) {
+                i64_input[i] = kwos_slice[i].second;
+                back_trace_offset[i] = kwos_slice[i].first;
+            });
+
+            auto task_starts = parlay::delayed_seq<bool>(n, [&](size_t i) {
+                return i == 0 || keys_sorted[i] != keys_sorted[i - 1];
+            });
+
+            ll = parlay::pack_index<uint32_t>(task_starts);
+            llen = ll.size();
         });
 
-        auto kwos_slice = parlay::make_slice(keys_with_offset_sorted,
-                                             keys_with_offset_sorted + n);
-        time_nested("sort", [&]() {
-            parlay::sort_inplace(kwos_slice,
-                                 [](const auto &t1, const auto &t2) {
-                                     return t1.second < t2.second;
-                                 });
-        });
-        parlay::parallel_for(0, n, [&](size_t i) {
-            i64_input[i] = kwos_slice[i].second;
-            back_trace_offset[i] = kwos_slice[i].first;
-        });
-    }
-
-    void get() {
-        int64_t *keys_sorted = i64_input;
-        int n = length;
-
-        auto task_starts = parlay::delayed_seq<bool>(n, [&](size_t i) {
-            return i == 0 || keys_sorted[i] != keys_sorted[i - 1];
-        });
-
-        auto ll = parlay::pack_index(task_starts);
-        int llen = ll.size();
+        // start batch get
+        std::shared_lock rLock(op_mutex);
 
         dpu_binary_switch_to(dpu_binary::query_binary);
-        auto io = alloc_io_manager();
-        // ASSERT(io == io_managers[0]);
+        auto io = IO_Manager::alloc_io_manager();
+        // ASSERT(io == IO_Manager::io_managers[0]);
         io->init();
         auto target = parlay::tabulate(llen, [&](int i) {
             return hash_to_dpu(keys_sorted[ll[i]], 0, nr_of_dpus);
@@ -1308,54 +1379,60 @@ class pim_skip_list {
 
         io->reset();
 
-        // assert(false);
-        // return result;
+        return {kv_output, n};
     }
 
-    void update(slice<key_value *, key_value *> ops) {
-        (void)ops;
+    template<typename GetKVF>
+    void RunBatchUpdate(size_t batch_size, GetKVF get_kv) {
+        (void)batch_size; (void)get_kv;
         assert(false);
     }
 
-    void predecessor_load(slice<int64_t *, int64_t *> keys) {
-        int n = keys.size();
-        length = n;
-        parlay::parallel_for(0, n, [&](size_t i) {
-            keys_with_offset_sorted[i] = make_pair(i, keys[i]);
-        });
+    template<typename GetKeyF>
+    std::pair<key_value*, size_t> RunBatchPredecessor(size_t batch_size, GetKeyF get_key) {
+        size_t n = length = batch_size;
 
-        auto kwos_slice = parlay::make_slice(keys_with_offset_sorted,
-                                             keys_with_offset_sorted + n);
-        time_nested("sort", [&]() {
-            parlay::sort_inplace(kwos_slice,
-                                 [](const auto &t1, const auto &t2) {
-                                     return t1.second < t2.second;
-                                 });
-        });
-
-        time_nested("deduplication", [&]() {
-            length_before_deduplication = length;
-            auto different = parlay::delayed_seq<bool>(n, [&](size_t i) {
-                return (i == 0) || (keys_with_offset_sorted[i].second !=
-                                    keys_with_offset_sorted[i - 1].second);
-            });
+        time_nested("Load", [&]() {
             parlay::parallel_for(0, n, [&](size_t i) {
-                back_trace_offset[i] = keys_with_offset_sorted[i].first;
+                keys_with_offset_sorted[i] = make_pair(i, get_key(i));
             });
-            auto btos_slice =
-                parlay::make_slice(back_trace_offset_startpos,
-                                   back_trace_offset_startpos + length);
-            n = length = parlay::pack_index_into(parlay::make_slice(different),
-                                                 btos_slice);
-            parlay::parallel_for(0, n, [&](size_t i) {
-                i64_input[i] = kwos_slice[btos_slice[i]].second;
+
+            auto kwos_slice = parlay::make_slice(keys_with_offset_sorted,
+                                                keys_with_offset_sorted + n);
+            time_nested("sort", [&]() {
+                parlay::sort_inplace(kwos_slice,
+                                    [](const auto &t1, const auto &t2) {
+                                        return t1.second < t2.second;
+                                    });
+            });
+
+            time_nested("deduplication", [&]() {
+                length_before_deduplication = length;
+                auto different = parlay::delayed_seq<bool>(n, [&](size_t i) {
+                    return (i == 0) || (keys_with_offset_sorted[i].second !=
+                                        keys_with_offset_sorted[i - 1].second);
+                });
+                parlay::parallel_for(0, n, [&](size_t i) {
+                    back_trace_offset[i] = keys_with_offset_sorted[i].first;
+                });
+                auto btos_slice =
+                    parlay::make_slice(back_trace_offset_startpos,
+                                    back_trace_offset_startpos + length);
+                n = length = parlay::pack_index_into(parlay::make_slice(different),
+                                                    btos_slice);
+                parlay::parallel_for(0, n, [&](size_t i) {
+                    i64_input[i] = kwos_slice[btos_slice[i]].second;
+                });
             });
         });
-    }
 
-    void predecessor() {
+        // start batch predecessor
+        std::shared_lock rLock(op_mutex);
+
         time_nested("core",
                     [&]() { predecessor_core(predecessor_only, NULL, NULL); });
+        
+        return {kv_output, n};
     }
 
     inline void horizontal_reduce(int *heights, int length) {
@@ -1415,29 +1492,43 @@ class pim_skip_list {
         });
     }
 
-    void insert_load(slice<key_value *, key_value *> kvs) {
-        int n = kvs.size();
-        length = n;
-        parlay::sort_inplace(kvs, [](auto t1, auto t2) { return t1 < t2; });
-        auto kv_input_slice = parlay::make_slice(kv_input, kv_input + length);
-        n = length = parlay::pack_into(
-            kvs,
-            parlay::make_slice(parlay::delayed_seq<bool>(
-                n,
-                [&](size_t i) {
-                    return (i == 0) || (kvs[i].key != kvs[i - 1].key);
-                })),
-            kv_input_slice);
-    }
+    template<typename GetKVF>
+    void RunBatchInsert(size_t batch_size, GetKVF get_kv) {
+        size_t n = length = batch_size;
 
-    void insert() {
+        time_nested("Load", [&]() {
+            // temporally borrow keys_with_offset_sorted to store & sort kv pairs
+            static_assert(sizeof(keys_with_offset_sorted[0]) == sizeof(get_kv(0)));
+            static_assert(std::is_same_v<decltype(get_kv(0)), key_value>);
+            key_value* kvs = (key_value*) keys_with_offset_sorted;
+            parlay::parallel_for(0, length, [&](size_t i) {
+                kvs[i] = get_kv(i);
+            });
+
+            auto kvs_slice = parlay::make_slice(kvs, kvs + length);
+            parlay::sort_inplace(kvs_slice, [](auto t1, auto t2) { return t1 < t2; });
+
+            auto kv_input_slice = parlay::make_slice(kv_input, kv_input + length);
+            n = length = parlay::pack_into(
+                kvs_slice,
+                parlay::make_slice(parlay::delayed_seq<bool>(
+                    n,
+                    [&](size_t i) {
+                        return (i == 0) || (kvs[i].key != kvs[i - 1].key);
+                    })),
+                kv_input_slice);
+        });
+
+        // start batch insert
+        std::unique_lock wLock(op_mutex);
+
         dpu_binary_switch_to(dpu_binary::query_binary);
-        time_start("init");
+        time_start("init", timer::current_timer);
         {
             auto kv_input_slice =
                 parlay::make_slice(kv_input, kv_input + length);
 
-            auto io = alloc_io_manager();
+            auto io = IO_Manager::alloc_io_manager();
             io->init();
             auto target = parlay::tabulate(length, [&](size_t i) {
                 return hash_to_dpu(kv_input[i].key, 0, nr_of_dpus);
@@ -1467,12 +1558,13 @@ class pim_skip_list {
             io->reset();
 
             auto tmp = parlay::pack(kv_input_slice, not_existed);
-            ASSERT(tmp.size() == length);
+            // ASSERT(tmp.size() == length);
             length = tmp.size();
             parlay::parallel_for(0, length,
                                  [&](size_t i) { kv_input[i] = tmp[i]; });
         }
-        int n = length;
+        
+        n = length;
         parlay::parallel_for(0, n,
                              [&](size_t i) { i64_input[i] = kv_input[i].key; });
         int64_t *keys = i64_input;
@@ -1483,8 +1575,9 @@ class pim_skip_list {
             length,
             [&](size_t i) -> int {
                 (void)&i;
-                int t = rn_gen::parallel_rand();
-                t = __builtin_ctz(t) + 1;
+                uint32_t hash_result = (uint32_t)parlay::hash64(keys[i]);
+                // int t = rn_gen::parallel_rand();
+                int t = __builtin_ctz(hash_result) + 1;
                 if (t <= L2_HEIGHT * L2_SIZE_LOG) {
                     t = (t - 1) / L2_SIZE_LOG + 1;
                 } else {
@@ -1494,9 +1587,9 @@ class pim_skip_list {
                 return t;
             },
             (PARALLEL_ON) ? 0 : INT32_MAX);
-            // 1111(chunking L1)
-            // 2222, 3333(chunking L2)
-            // 4, 5, 6(L3), ...
+        // 1111(chunking L1)
+        // 2222, 3333(chunking L2)
+        // 4, 5, 6(L3), ...
 
         auto predecessor_record = parlay::map(heights, [&](int32_t x) {
             return (x >= CACHE_HEIGHT) ? L2_HEIGHT : 1;
@@ -1535,7 +1628,8 @@ class pim_skip_list {
             int i = node_id[L2_HEIGHT][x];
             int cnc = INT32_MAX;
             for (int KK = 0; KK < 4; KK++) {
-                int t = abs(rn_gen::parallel_rand()) % nr_of_dpus;
+                int t = (uint32_t)(parlay::hash64(keys[i] + KK)) % nr_of_dpus;
+                // int t = abs(rn_gen::parallel_rand()) % nr_of_dpus;
                 if (l2_root_count[t] < cnc) {
                     cnc = l2_root_count[t];
                     l2_root_target[i] = t;
@@ -1554,7 +1648,7 @@ class pim_skip_list {
 
         printf("\n**** INSERT L123 ****\n");
 
-        time_start("newnode L123 + truncate L2");
+        time_start("newnode L123 + truncate L2", timer::current_timer);
 
         auto l1_addrs = parlay::sequence(length, null_pptr);
         auto l2_addrs =
@@ -1565,8 +1659,8 @@ class pim_skip_list {
             parlay::map(predecessor_record_prefix_sum,
                         [&](int32_t x) { return l2_addrs_taskpos_buf + x; });
 
-        auto io = alloc_io_manager();
-        // ASSERT(io == io_managers[0]);
+        auto io = IO_Manager::alloc_io_manager();
+        // ASSERT(io == IO_Manager::io_managers[0]);
         io->init();
 
         auto L2_newnode_batch = io->alloc_task_batch(
@@ -1704,6 +1798,7 @@ class pim_skip_list {
                             (b_newnode_reply *)L2_newnode_batch->get_reply(
                                 l2_addrs_taskpos[i][ht], target);
                         l2_addrs[i][ht] = bir->addr;
+                        ASSERT(valid_b_pptr(bir->addr));
                     }
                 });
             }
@@ -1722,8 +1817,8 @@ class pim_skip_list {
 
         printf("\n**** INSERT L123 ud ****\n");
 
-        auto io2 = alloc_io_manager();
-        ASSERT(io2 == io_managers[1]);
+        auto io2 = IO_Manager::alloc_io_manager();
+        ASSERT(io2 == IO_Manager::io_managers[1]);
         io2->init();
 
         IO_Task_Batch *L3_insert_batch = nullptr;
@@ -1861,7 +1956,6 @@ class pim_skip_list {
                                     }
                                 }
 #endif
-
 
                                 int64_t key_r = INT64_MAX;
                                 for (int j = r - 1; j >= (int)t; j--) {
@@ -2001,8 +2095,8 @@ class pim_skip_list {
 
         ASSERT(L2_HEIGHT == 3);
 
-        io = alloc_io_manager();
-        // ASSERT(io == io_managers[0]);
+        io = IO_Manager::alloc_io_manager();
+        // ASSERT(io == IO_Manager::io_managers[0]);
         io->init();
 
         ASSERT(CACHE_HEIGHT == 2);
@@ -2094,22 +2188,33 @@ class pim_skip_list {
         return;
     }
 
-    void remove_load(slice<int64_t *, int64_t *> _keys) {
-        length = _keys.size();
-        int n = length;
-        parlay::sort_inplace(_keys);
-        auto i64_input_slice = make_slice(i64_input, i64_input + length);
-        length = parlay::pack_into(
-            _keys,
-            parlay::delayed_seq<bool>(n,
-                                      [&](size_t i) {
-                                          return (i == 0) ||
-                                                 (_keys[i] != _keys[i - 1]);
-                                      }),
-            i64_input_slice);
-    }
+    template <typename GetKeyF>
+    void RunBatchRemove(size_t batch_size, GetKeyF get_key) {
+        size_t n = length = batch_size;
+        
+        time_nested("Load", [&]() {
+            // temporally borrow keys_with_offset_sorted to store & sort kv pairs
+            static_assert(sizeof(keys_with_offset_sorted[0]) >= sizeof(get_key(0)));
+            static_assert(std::is_same_v<decltype(get_key(0)), int64_t>);
+            int64_t* keys = (int64_t*) keys_with_offset_sorted;
+            parlay::parallel_for(0, n, [&](size_t i) {
+                keys[i] = get_key(i);
+            });
+            auto keys_slice = parlay::make_slice(keys, keys + length);
+            parlay::sort_inplace(keys_slice);
+            auto i64_input_slice = parlay::make_slice(i64_input, i64_input + length);
+            auto different = parlay::delayed_seq<bool>(n, [&](size_t i) {
+                return (i == 0) || (keys[i] != keys[i - 1]);
+            });
+            n = length = parlay::pack_into(
+                keys_slice,
+                different,
+                i64_input_slice);
+        });
 
-    void remove() {
+        // start batch remove
+        std::unique_lock wLock(op_mutex);
+
 #ifndef SHADOW_SUBTREE
         throw "shadow subtree not removed from DELETE.";
 #endif
@@ -2126,8 +2231,8 @@ class pim_skip_list {
             // get height, also remove from hash tables
             dpu_binary_switch_to(dpu_binary::query_binary);
 
-            auto io = alloc_io_manager();
-            // ASSERT(io == io_managers[0]);
+            auto io = IO_Manager::alloc_io_manager();
+            // ASSERT(io == IO_Manager::io_managers[0]);
             io->init();
 
             auto keys_target = parlay::tabulate(length, [&](uint32_t i) {
@@ -2242,8 +2347,8 @@ class pim_skip_list {
             [&](int32_t x) { return insert_truncate_taskpos_buf + x; });
 
         time_nested("core", [&]() {
-            auto io = alloc_io_manager();
-            // ASSERT(io == io_managers[0]);
+            auto io = IO_Manager::alloc_io_manager();
+            // ASSERT(io == IO_Manager::io_managers[0]);
             io->init();
 
             auto L2_remove_batch = io->alloc_task_batch(
@@ -2323,12 +2428,12 @@ class pim_skip_list {
 
             time_nested("L2 remove exec", [&]() { ASSERT(io->exec()); });
 
-            auto io2 = alloc_io_manager();
-            ASSERT(io2 == io_managers[1]);
+            auto io2 = IO_Manager::alloc_io_manager();
+            ASSERT(io2 == IO_Manager::io_managers[1]);
             io2->init();
 
-            auto io3 = alloc_io_manager();
-            ASSERT(io3 == io_managers[2]);
+            auto io3 = IO_Manager::alloc_io_manager();
+            ASSERT(io3 == IO_Manager::io_managers[2]);
             io3->init();
 
             IO_Task_Batch *L3_remove_batch = nullptr;
@@ -2781,7 +2886,7 @@ class pim_skip_list {
         ASSERT(pull_llen == pull_rren);
         auto scan_taskpos = parlay::sequence<int32_t>(prev_node_num);
 
-        auto io = alloc_io_manager();
+        auto io = IO_Manager::alloc_io_manager();
         io->init();
 
         time_nested("task gen", [&]() {
@@ -3313,7 +3418,7 @@ class pim_skip_list {
 
         parlay::sequence<pptr> l3_addrs;
         time_nested("L3 Scan", [&]() {
-            auto io = alloc_io_manager();
+            auto io = IO_Manager::alloc_io_manager();
             io->init();
             IO_Task_Batch *L3_scan_batch;
 
@@ -3376,11 +3481,8 @@ class pim_skip_list {
             });
             io->reset();
         });
-#ifdef L3_SKIP_LIST
-        printf("L3 skip list scan finished\n");
-#else
+
         printf("L3 AB-Tree scan finished\n");
-#endif
 
         parlay::sequence<pptr> l2_addrs_0;
         time_nested("L2 Scan", [&]() {
@@ -3411,7 +3513,7 @@ class pim_skip_list {
         printf("L1 scan starts\n");
         time_nested("L1", [&]() {
             auto scan_taskpos = parlay::sequence<int32_t>(kvs.size());
-            auto io = alloc_io_manager();
+            auto io = IO_Manager::alloc_io_manager();
             io->init();
             auto L1_search_batch =
                 io->alloc<p_get_key_task, p_get_key_reply>(direct);
@@ -3447,7 +3549,7 @@ class pim_skip_list {
         });
         printf("L1 scan finished\n");
 
-        time_start("reassemble results");
+        time_start("reassemble results", timer::current_timer);
         parlay::sort_inplace(kvs, [&](key_value kv1, key_value kv2) -> bool {
             return (kv1.key < kv2.key) ||
                    ((kv1.key == kv2.key) && (kv1.value < kv2.value));
@@ -3514,5 +3616,3 @@ class pim_skip_list {
         return std::make_pair(kv_set, index_set);
     }
 };
-
-pim_skip_list *pim_skip_list_drivers;

@@ -4,18 +4,18 @@
 #include <cstring>
 #include <string>
 #include <cstdio>
-using namespace std;
 
 class papi_global_counters {
 public:
     #ifdef USE_PAPI
     int64_t startval[nall_cpu_counters];
     int64_t totval[nall_cpu_counters];
-    string name;
+    std::string name;
+
     #endif
-    papi_global_counters(char* _name) {
+    papi_global_counters(std::string _name) {
         #ifdef USE_PAPI
-        name = string(_name);
+        name = _name;
         memset(startval, 0, sizeof(startval));
         memset(totval, 0, sizeof(totval));
         #endif

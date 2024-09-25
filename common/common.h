@@ -24,12 +24,8 @@
 #define DB_BUFFER_SIZE (17 << 20) // 17 MB
 #define P_BUFFER_SIZE (15 << 19) // 7.5MB
 
-#define MAX_TASK_BUFFER_SIZE_PER_DPU (800 << 13) // 6.4 MB
+#define MAX_TASK_BUFFER_SIZE_PER_DPU (6396 << 10) // 6.4 MB - 4KB
 #define MAX_TASK_COUNT_PER_DPU_PER_BLOCK ((100 << 10) >> 3) // 100 KB = 12.5 K
-
-// L3_SKIP_LIST macro obsolete.
-// Do not use L3_SKIP_LIST. The program may crash with it.
-// #define L3_SKIP_LIST
 
 /* Structure used by both the host and the dpu to communicate information */
 
