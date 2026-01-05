@@ -31,6 +31,6 @@ static inline mcirptr reserve_space_cache_init_record(int len) {
     mcirptr ret = cirbuffer + circnt;
     circnt += len;
     mutex_unlock(cir_lock);
-    SPACE_IN_DPU_ASSERT(circnt < (CACHE_INIT_RECORD_SIZE / sizeof(cache_init_record)), "rscir! of\n");
+    SPACE_IN_DPU_ASSERT(circnt < (CACHE_INIT_RECORD_SIZE / sizeof(cache_init_record)));
     return ret;
 }

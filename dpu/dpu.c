@@ -98,7 +98,7 @@ void execute(int l, int r) {
                 init_task_reader(0);
                 dpu_init_task* it = (dpu_init_task*)get_task_cached(0);
                 dpu_init(it);
-                dpu_init_reply ir =
+                __dma_aligned dpu_init_reply ir =
                     (dpu_init_reply){.bbuffer_start = (uint64_t)bbuffer_start,
                                  .bbuffer_end = (uint64_t)bbuffer_end,
                                  .pbuffer_start = (uint64_t)pbuffer_start,
@@ -163,7 +163,7 @@ void execute(int l, int r) {
                 mL3Bptr nn;
                 pptr val = null_pptr;
                 int64_t key = l3b_search(tst->key, &nn, &val);
-                L3_search_reply tsr = (L3_search_reply){.addr = val};
+                __dma_aligned L3_search_reply tsr = (L3_search_reply){.addr = val};
                 push_fixed_reply(i, &tsr);
             }
             break;
@@ -328,7 +328,7 @@ void execute(int l, int r) {
 
                 b_newnode(bnn, n1, n2, n3, bnt->height);
 
-                b_newnode_reply bnr = (b_newnode_reply){
+                __dma_aligned b_newnode_reply bnr = (b_newnode_reply){
                     .addr = (pptr){.id = (uint32_t)DPU_ID, .addr = (uint32_t)bnn}};
                 push_fixed_reply(i, &bnr);
             }
@@ -559,7 +559,7 @@ void execute(int l, int r) {
                     mBptr nn = (mBptr)(crt->addr.addr);
                     int nnlen = nn->len;
                     if (nnlen <= 0) continue;
-                    pptr ad2 = mram_buffer[i];
+                    __dma_aligned pptr ad2 = mram_buffer[i];
 // #ifdef KHB_DEBUG
 //                     nn = cache_find(nn, crt->key, crt->height);
 //                     pptr ad = (pptr){.id = (uint32_t)DPU_ID, .addr = nn};
@@ -622,7 +622,7 @@ void execute(int l, int r) {
                 // IN_DPU_ASSERT(len < 1000, "cirt! of\n");
                 replyptr->len = len;
                 for (int i = 0; i < len; i++) {
-                    cache_init_record cir;
+                    __dma_aligned cache_init_record cir;
                     mram_read(cirbuffer + i + 1, &cir,
                               sizeof(cache_init_record));
                     replyptr->vals[2 * i] = PPTR_TO_I64(cir.addr);
@@ -713,7 +713,7 @@ void execute(int l, int r) {
                     (b_fixed_search_task*)get_task_cached(i);
                 pptr addr = bfst->addr;
                 int64_t key = bfst->key;
-                b_fixed_search_reply bfsr;
+                __dma_aligned b_fixed_search_reply bfsr;
                 if (!in_bbuffer(addr.addr)) {
                     IN_DPU_ASSERT(in_pbuffer(addr.addr), "bfst! inv\n");
                     bfsr = (b_fixed_search_reply){.addr = addr};
@@ -735,10 +735,24 @@ void execute(int l, int r) {
             init_block_with_type(b_search_with_path_task,
                                  b_search_with_path_reply);
 
-            varlen_buffer* taskbuf = varlen_buffer_new(2 * L2_SIZE + 2);
-            varlen_buffer* replybuf = varlen_buffer_new(1);
-            varlen_buffer* replykeysbuf = varlen_buffer_new(1);
-            varlen_buffer* replyaddrsbuf = varlen_buffer_new(1);
+            int max_len = 0, max_siz = 0;
+            for (int i = l; i < r; i ++) {
+                __mram_ptr b_search_with_path_task* mbswpt =
+                    (__mram_ptr b_search_with_path_task*)get_task(i);
+                int len = (int)mbswpt->len;
+                int siz = b_search_with_path_task_siz(len);
+                if (len > max_len) {
+                    max_len = len;
+                }
+                if (siz > max_siz) {
+                    max_siz = siz;
+                }
+            }
+
+            varlen_buffer* taskbuf = varlen_buffer_new(max_siz);
+            varlen_buffer* replybuf = varlen_buffer_new(max_len * 3);
+            varlen_buffer* replykeysbuf = varlen_buffer_new(max_len);
+            varlen_buffer* replyaddrsbuf = varlen_buffer_new(max_len);
 
             for (int i = l; i < r; i++) {
                 __mram_ptr b_search_with_path_task* mbswpt =
@@ -888,7 +902,7 @@ void execute(int l, int r) {
                 p_newnode_task* pnt = (p_newnode_task*)get_task_cached(i);
                 mPptr pn = alloc_pn();
                 p_newnode(pnt->key, pnt->value, pnt->height, pn);
-                p_newnode_reply rep = (p_newnode_reply){
+                __dma_aligned p_newnode_reply rep = (p_newnode_reply){
                     .addr = {.id = (uint32_t)DPU_ID, .addr = (uint32_t)pn}};
                 push_fixed_reply(i, &rep);
             }
@@ -903,7 +917,7 @@ void execute(int l, int r) {
             init_task_reader(l);
             for (int i = l; i < r; i++) {
                 p_get_key_task* pgkt = (p_get_key_task*)get_task_cached(i);
-                p_get_key_reply rep = {.key = p_get_key(pgkt->addr),
+                __dma_aligned p_get_key_reply rep = {.key = p_get_key(pgkt->addr),
                                        .value = p_get_value(pgkt->addr)};
                 push_fixed_reply(i, &rep);
             }
@@ -919,7 +933,7 @@ void execute(int l, int r) {
             for (int i = l; i < r; i++) {
                 p_get_task* pgt = (p_get_task*)get_task_cached(i);
                 pptr addr = p_get(pgt->key);
-                p_get_reply rep;
+                __dma_aligned p_get_reply rep;
                 if (equal_pptr(addr, null_pptr)) {
                     rep = (p_get_reply){.key = INT64_MIN, .value = INT64_MIN};
                 } else {
@@ -942,7 +956,7 @@ void execute(int l, int r) {
             for (int i = l; i < r; i++) {
                 p_update_task* pgt = (p_update_task*)get_task_cached(i);
                 pptr addr = p_get(pgt->key);
-                p_update_reply rep;
+                __dma_aligned p_update_reply rep;
                 if (equal_pptr(addr, null_pptr)) {
                     rep = (p_update_reply){.valid = 0};
                 } else {
@@ -964,7 +978,7 @@ void execute(int l, int r) {
             for (int i = l; i < r; i++) {
                 p_get_height_task* pght =
                     (p_get_height_task*)get_task_cached(i);
-                p_get_height_reply rep = {.height = p_get_height(pght->key)};
+                __dma_aligned p_get_height_reply rep = {.height = p_get_height(pght->key)};
                 push_fixed_reply(i, &rep);
             }
             break;

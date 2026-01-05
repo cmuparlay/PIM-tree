@@ -14,6 +14,7 @@
 #include "value.hpp"
 #include "add_parlay_lib.hpp"
 #include "parlay/utilities.h"
+#include "number_conversion.hpp"
 using namespace std;
 
 class PIMTreeIndex {
@@ -197,6 +198,7 @@ class PIMTreeIndex {
                                                                  false);
                 pnt->key = INT64_MIN;
                 pnt->height = l3_height + L2_HEIGHT;
+                pnt->value = INT64_MIN;
                 io->finish_task_batch();
             }
 
@@ -1285,7 +1287,8 @@ class PIMTreeIndex {
                                 ? length_before_deduplication
                                 : back_trace_offset_startpos[ll[i + 1]];
                         parfor_wrap(result_l, result_r, [&](size_t x) {
-                            kv_output[off[x]] = (key_value)(pgkr->key, pgkr->value);
+                            kv_output[off[x]].key = pgkr->key;
+                            kv_output[off[x]].value = pgkr->value;
                         });
                     });
                 });
@@ -1312,10 +1315,13 @@ class PIMTreeIndex {
             auto kwos_slice = parlay::make_slice(keys_with_offset_sorted,
                                                 keys_with_offset_sorted + n);
             time_nested("sort", [&]() {
-                parlay::sort_inplace(kwos_slice,
-                                    [](const auto &t1, const auto &t2) {
-                                        return t1.second < t2.second;
-                                    });
+                parlay::integer_sort_inplace(kwos_slice, [&](const auto &t) {
+                    return ConvertI64UI64::I64ToUI64(t.second);
+                });
+                // parlay::sort_inplace(kwos_slice,
+                //                     [](const auto &t1, const auto &t2) {
+                //                         return t1.second < t2.second;
+                //                     });
             });
             
             parlay::parallel_for(0, n, [&](size_t i) {
@@ -1371,8 +1377,8 @@ class PIMTreeIndex {
                 int l = ll[i];
                 int r = (i == llen - 1) ? n : ll[i + 1];
                 parlay::parallel_for(l, r, [&](size_t x) {
-                    kv_output[idx[x]] =
-                        (key_value){.key = reply->key, .value = reply->value};
+                    kv_output[idx[x]].key = reply->key;
+                    kv_output[idx[x]].value = reply->value;
                 });
             });
         });
@@ -1400,10 +1406,13 @@ class PIMTreeIndex {
             auto kwos_slice = parlay::make_slice(keys_with_offset_sorted,
                                                 keys_with_offset_sorted + n);
             time_nested("sort", [&]() {
-                parlay::sort_inplace(kwos_slice,
-                                    [](const auto &t1, const auto &t2) {
-                                        return t1.second < t2.second;
-                                    });
+                parlay::integer_sort_inplace(kwos_slice, [&](const auto &t) {
+                    return ConvertI64UI64::I64ToUI64(t.second);
+                });
+                // parlay::sort_inplace(kwos_slice,
+                //                     [](const auto &t1, const auto &t2) {
+                //                         return t1.second < t2.second;
+                //                     });
             });
 
             time_nested("deduplication", [&]() {
@@ -1425,6 +1434,8 @@ class PIMTreeIndex {
                 });
             });
         });
+
+        printf("Run Predecessor over %zu keys\n", n);
 
         // start batch predecessor
         std::shared_lock rLock(op_mutex);

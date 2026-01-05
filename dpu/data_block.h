@@ -120,8 +120,7 @@ static inline mdbptr alloc_db() {
     }
     data_block_init(ret);
     mutex_unlock(db_lock);
-    SPACE_IN_DPU_ASSERT(dbcnt < (DB_BUFFER_SIZE / sizeof(data_block)),
-                  "rsdb! of\n");
+    SPACE_IN_DPU_ASSERT(dbcnt < (DB_BUFFER_SIZE / sizeof(data_block)));
     return ret;
 }
 

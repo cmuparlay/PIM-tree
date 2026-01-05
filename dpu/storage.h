@@ -131,7 +131,7 @@ typedef struct WRAMHeap {
     uint64_t cycle_cnt;
 #endif
 
-} WRAMHeap; //` __attribute__((aligned (8)));
+} WRAMHeap __attribute__((aligned (8)));
 
 __mram_noinit uint8_t wram_heap_save_addr_tmp[sizeof(WRAMHeap) << 1];
 

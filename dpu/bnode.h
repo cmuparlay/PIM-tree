@@ -33,7 +33,7 @@ static inline mBptr alloc_bn() {
         ret = (mBptr)recycle.addr;
     }
     mutex_unlock(b_lock);
-    SPACE_IN_DPU_ASSERT(bcnt < (B_BUFFER_SIZE / sizeof(Bnode)), "rsb! of\n");
+    SPACE_IN_DPU_ASSERT(bcnt < (B_BUFFER_SIZE / sizeof(Bnode)));
     return ret;
 }
 

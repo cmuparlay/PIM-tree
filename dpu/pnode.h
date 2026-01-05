@@ -34,7 +34,7 @@ static inline mPptr alloc_pn() {
         ret = (mPptr)recycle.addr;
     }
     mutex_unlock(p_lock);
-    SPACE_IN_DPU_ASSERT(pcnt < (P_BUFFER_SIZE / sizeof(Pnode)), "rsp! of\n");
+    SPACE_IN_DPU_ASSERT(pcnt < (P_BUFFER_SIZE / sizeof(Pnode)));
     return ret;
 }
 
